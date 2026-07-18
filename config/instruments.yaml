@@ -1,0 +1,7 @@
+instruments:
+  - code: "2330"
+    security_type: "STK"
+    exchange: "TSE"
+    enabled: true
+    streams: ["bidask", "tick"]
+    intraday_odd: false

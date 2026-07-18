@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+test "$#" -eq 1 || { echo "usage: scripts/storage-check ABSOLUTE_DATA_ROOT" >&2; exit 2; }
+root="$1"
+test "${root#/}" != "$root" && test "$root" != "/" || { echo "unsafe storage root" >&2; exit 1; }
+test -f "$root/.lob-storage-root" || { echo "storage marker missing" >&2; exit 1; }
+mountpoint -q "$root" || { echo "storage root is not a mount point" >&2; exit 1; }
+test -r "$root" && test -w "$root" && test -x "$root" || { echo "storage root permission check failed" >&2; exit 1; }
+echo "storage check passed"

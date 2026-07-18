@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 1 || { echo "usage: sudo scripts/host-prepare ABSOLUTE_DATA_ROOT" >&2; exit 2; }
+root="$1"
+test "${root#/}" != "$root" && test "$root" != "/" || { echo "unsafe storage root" >&2; exit 1; }
+mountpoint -q "$root" || { echo "storage root must already be a mounted filesystem" >&2; exit 1; }
+
+mkdir -p "$root/clickhouse" "$root/parquet" "$root/spool" "$root/backup" \
+  "$root/private-runtime/shioaji/home" "$root/private-runtime/shioaji/contracts" \
+  "$root/private-runtime/collector" "$root/private-runtime/crash" "$root/private-runtime/tmp"
+printf 'shioaji-lob-recorder-v1\n' > "$root/.lob-storage-root"
+chown 101:101 "$root/clickhouse"
+chmod 0700 "$root/clickhouse"
+chown -R 10001:10001 "$root/parquet" "$root/spool" "$root/backup" "$root/private-runtime"
+chmod 0700 "$root/parquet" "$root/spool" "$root/backup" "$root/private-runtime"
+chmod 0600 "$root/.lob-storage-root"
+echo "host storage prepared"

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+umask 077
+ulimit -c 0
+
+private_root="${LOB_PRIVATE_ROOT:-/var/lib/lob/private-runtime}"
+mkdir -p "$private_root/shioaji/home" "$private_root/shioaji/contracts" \
+  "$private_root/collector" "$private_root/crash" "$private_root/tmp" \
+  "${LOB_SPOOL_ROOT:-/var/lib/lob/spool}" "${LOB_PARQUET_ROOT:-/var/lib/lob/parquet}"
+
+export SJ_HOME_PATH="$private_root/shioaji/home"
+export SJ_CONTRACTS_PATH="$private_root/shioaji/contracts"
+export SJ_LOG_PATH="$private_root/shioaji/shioaji.log"
+
+exec lob-recorder "$@"

@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+from lob_recorder.collector import Collector, install_signal_handlers
+from lob_recorder.config import load_instruments
+from lob_recorder.credentials import load_credentials
+from lob_recorder.exporter import export_clickhouse
+from lob_recorder.pilot import collect_report
+from lob_recorder.privacy import correlation_id
+from lob_recorder.privacy_tools import inventory, purge_runtime, purge_spool
+from lob_recorder.quality import inspect, inspect_parquet
+from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
+from lob_recorder.sources.fixture import FixtureSource
+from lob_recorder.storage import ensure_layout, validate_storage
+
+
+def env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def build_collector(sink, storage_root: Path) -> Collector:
+    private = Path(env("LOB_PRIVATE_ROOT", str(storage_root / "private-runtime")))
+    return Collector(
+        sink=sink,
+        spool_root=env("LOB_SPOOL_ROOT", str(storage_root / "spool")),
+        log_path=private / "collector/collector.log",
+        health_path=private / "collector/health.json",
+        queue_size=int(env("LOB_QUEUE_SIZE", "20000")),
+        batch_size=int(env("LOB_BATCH_SIZE", "1000")),
+        flush_ms=int(env("LOB_FLUSH_MS", "250")),
+        storage_root=storage_root,
+        warn_percent=float(env("LOB_WARN_PERCENT", "80")),
+        stop_percent=float(env("LOB_STOP_PERCENT", "90")),
+    )
+
+
+def run_fixture(fixture: str, output: str, keep_running: bool = False, sink=None) -> dict:
+    configured_root = os.environ.get("LOB_STORAGE_ROOT")
+    storage_root = Path(configured_root or tempfile.mkdtemp(prefix="lob-fixture-"))
+    allow_test = not configured_root or env("LOB_ALLOW_TEST_STORAGE", "false").lower() == "true"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    (storage_root / ".lob-storage-root").touch(mode=0o600, exist_ok=True)
+    ensure_layout(storage_root)
+    validate_storage(storage_root, "fixture", allow_test=allow_test)
+    collector = build_collector(sink or JsonlSink(output), storage_root)
+    collector.start()
+    for raw in FixtureSource(fixture).events():
+        collector.emit(raw)
+    if keep_running:
+        stopped = threading.Event()
+        install_signal_handlers(stopped.set)
+        stopped.wait()
+    collector.stop()
+    return collector.counters.__dict__ if hasattr(collector.counters, "__dict__") else {
+        name: getattr(collector.counters, name) for name in ("received", "written", "spooled", "replayed", "dropped")
+    }
+
+
+def run_live() -> None:
+    storage_root = validate_storage(env("LOB_STORAGE_ROOT", "/var/lib/lob"), "live", allow_test=False)
+    instruments = load_instruments(env("LOB_CONFIG", "/app/config/instruments.yaml"))
+    credentials = load_credentials(env("LOB_CREDENTIAL_FILE", "/run/secrets/shioaji_credentials"))
+    sink = ClickHouseSink(env("LOB_CLICKHOUSE_HOST", "clickhouse"))
+    collector = build_collector(sink, storage_root)
+    from lob_recorder.sources.shioaji_source import ShioajiSource
+    stopped = threading.Event()
+    install_signal_handlers(stopped.set)
+    collector.start()
+    source = None
+    try:
+        retry_seconds = 60
+        while not stopped.is_set():
+            source = ShioajiSource(credentials, instruments, collector.emit, lambda: collector.record_gap("connection_down"))
+            try:
+                results = source.connect()
+                for result in results:
+                    collector.logger.write("subscription_result", symbol=result.code, stream=result.stream, status=result.category)
+                collector.logger.write("subscriptions_ready", status="active", count=sum(result.active for result in results))
+                break
+            except Exception as exc:
+                collector.logger.write("live_start_failed", level="error", category=type(exc).__name__, correlation_id=correlation_id(exc))
+                collector.record_gap("live_start_failure")
+                source.close()
+                source = None
+                if stopped.wait(retry_seconds):
+                    return
+                retry_seconds = min(retry_seconds * 2, 900)
+        stopped.wait()
+    finally:
+        if source is not None:
+            source.close()
+        collector.stop()
+
+
+def command_run(_args) -> None:
+    mode = env("LOB_MODE", "fixture")
+    if mode == "live":
+        run_live()
+    elif mode == "fixture":
+        root = Path(env("LOB_STORAGE_ROOT", "/var/lib/lob"))
+        sink = ClickHouseSink(env("LOB_CLICKHOUSE_HOST", "clickhouse"))
+        run_fixture(env("LOB_FIXTURE", "/app/fixtures/events.jsonl"), str(root / "private-runtime/collector/fixture-output.jsonl"), keep_running=True, sink=sink)
+    else:
+        raise SystemExit("LOB_MODE must be fixture or live")
+
+
+def command_fixture(args) -> None:
+    print(json.dumps(run_fixture(args.input, args.output), sort_keys=True))
+
+
+def command_init_storage(args) -> None:
+    root = Path(args.root)
+    if not root.is_absolute() or root == Path("/"):
+        raise SystemExit("refusing unsafe storage root")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_layout(root)
+    (root / ".lob-storage-root").write_text("shioaji-lob-recorder-v1\n", encoding="ascii")
+    print("storage layout initialized")
+
+
+def command_health(args) -> None:
+    try:
+        data = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise SystemExit(1)
+    raise SystemExit(0 if data.get("status") == "running" else 1)
+
+
+def command_privacy_list(args) -> None:
+    for area, root in (("private-runtime", args.root), ("spool", args.spool_root)):
+        if not root:
+            continue
+        for item in inventory(root):
+            print(json.dumps({"area": area, **item}, sort_keys=True))
+
+
+def _confirmed(args, warning: str) -> bool:
+    if args.dry_run:
+        return True
+    if not args.yes:
+        answer = input(f"{warning} Type DELETE to continue: ")
+        return answer == "DELETE"
+    return True
+
+
+def command_privacy_purge(args) -> None:
+    if not any((args.runtime, args.spool, args.credentials, args.all_private)):
+        raise SystemExit("select a purge scope")
+    if not _confirmed(args, "Collector must be stopped before purge."):
+        raise SystemExit("cancelled")
+    count = 0
+    if args.runtime or args.all_private:
+        count += purge_runtime(args.runtime_root, args.dry_run)
+    if args.spool:
+        if not _confirmed(args, "Spool deletion permanently loses pending market data."):
+            raise SystemExit("cancelled")
+        count += purge_spool(args.spool_root, args.dry_run)
+    if args.credentials or args.all_private:
+        credential = Path(args.credential_file)
+        if credential.exists():
+            count += 1
+            if not args.dry_run:
+                credential.unlink()
+    print(json.dumps({"files_selected": count, "dry_run": args.dry_run}, sort_keys=True))
+
+
+def command_quality(args) -> None:
+    result = inspect(read_jsonl(args.input)) if args.input else inspect_parquet(args.parquet)
+    print(json.dumps(result, sort_keys=True))
+
+
+def command_export(args) -> None:
+    export_clickhouse(args.host, args.symbol, args.date, args.output)
+    print("parquet export complete")
+
+
+def command_pilot_report(args) -> None:
+    collect_report(args.host, args.output, args.storage_total_bytes)
+    print("pilot report complete")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="lob-recorder")
+    sub = result.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run"); run.set_defaults(func=command_run)
+    fixture = sub.add_parser("fixture"); fixture.add_argument("--input", required=True); fixture.add_argument("--output", required=True); fixture.set_defaults(func=command_fixture)
+    init = sub.add_parser("init-storage"); init.add_argument("--root", required=True); init.set_defaults(func=command_init_storage)
+    health = sub.add_parser("health"); health.add_argument("--file", required=True); health.set_defaults(func=command_health)
+    listing = sub.add_parser("privacy-list"); listing.add_argument("--root", required=True); listing.add_argument("--spool-root"); listing.set_defaults(func=command_privacy_list)
+    purge = sub.add_parser("privacy-purge")
+    purge.add_argument("--runtime", action="store_true"); purge.add_argument("--spool", action="store_true")
+    purge.add_argument("--credentials", action="store_true"); purge.add_argument("--all-private", action="store_true")
+    purge.add_argument("--database-metadata", action="store_true", help="handled by scripts/privacy-purge using ClickHouse exec")
+    purge.add_argument("--runtime-root", required=True); purge.add_argument("--spool-root", required=True); purge.add_argument("--credential-file", required=True)
+    purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
+    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.set_defaults(func=command_quality)
+    export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export.add_argument("--symbol", required=True); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
+    pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
+    return result
+
+
+def main() -> None:
+    args = parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

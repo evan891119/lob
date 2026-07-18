@@ -1,0 +1,96 @@
+name: shioaji-lob-recorder
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.6.3.116-alpine
+    restart: unless-stopped
+    networks: [lob_internal]
+    environment:
+      # Safe only because lob_internal is isolated and no ClickHouse port is published.
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    volumes:
+      - type: bind
+        source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}/clickhouse
+        target: /var/lib/clickhouse
+      - type: bind
+        source: ./migrations
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    deploy:
+      resources:
+        limits:
+          memory: ${CLICKHOUSE_MEMORY_LIMIT:-8G}
+
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks: [lob_internal, outbound]
+    environment:
+      LOB_MODE: ${LOB_MODE:-fixture}
+      LOB_CONFIG: /app/config/instruments.yaml
+      LOB_FIXTURE: /app/fixtures/events.jsonl
+      LOB_CLICKHOUSE_HOST: clickhouse
+      LOB_PRIVATE_ROOT: /var/lib/lob/private-runtime
+      LOB_SPOOL_ROOT: /var/lib/lob/spool
+      LOB_PARQUET_ROOT: /var/lib/lob/parquet
+      LOB_STORAGE_ROOT: /var/lib/lob
+      LOB_STORAGE_MARKER: /var/lib/lob/.lob-storage-root
+      LOB_ALLOW_TEST_STORAGE: ${LOB_ALLOW_TEST_STORAGE:-false}
+      LOB_BATCH_SIZE: ${LOB_BATCH_SIZE:-1000}
+      LOB_FLUSH_MS: ${LOB_FLUSH_MS:-250}
+      LOB_QUEUE_SIZE: ${LOB_QUEUE_SIZE:-20000}
+      LOB_WARN_PERCENT: ${LOB_WARN_PERCENT:-80}
+      LOB_STOP_PERCENT: ${LOB_STOP_PERCENT:-90}
+      LOB_CREDENTIAL_FILE: /run/secrets/shioaji_credentials
+    secrets:
+      - shioaji_credentials
+    volumes:
+      - type: bind
+        source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}
+        target: /var/lib/lob
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    read_only: true
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: none
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "lob-recorder", "health", "--file", "/var/lib/lob/private-runtime/collector/health.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: ${COLLECTOR_MEMORY_LIMIT:-2G}
+
+networks:
+  lob_internal:
+    internal: true
+  outbound: {}
+
+secrets:
+  shioaji_credentials:
+    file: ${LOB_CREDENTIAL_FILE:-./secrets/shioaji.env.example}

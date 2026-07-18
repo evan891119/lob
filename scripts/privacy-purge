@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+data_root="${LOB_DATA_ROOT:-}"
+credential_file="${LOB_CREDENTIAL_FILE:-/etc/shioaji-lob-recorder/shioaji.env}"
+test -n "$data_root" || { echo "LOB_DATA_ROOT is required" >&2; exit 2; }
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
+
+database_metadata=false
+python_scope=false
+dry_run=false
+assume_yes=false
+args=""
+for arg in "$@"; do
+  case "$arg" in
+    --database-metadata) database_metadata=true ;;
+    --all-private) args="$args $arg"; python_scope=true; database_metadata=true ;;
+    --runtime|--spool|--credentials) args="$args $arg"; python_scope=true ;;
+    --dry-run) args="$args $arg"; dry_run=true ;;
+    --yes) args="$args $arg"; assume_yes=true ;;
+    *) echo "unsupported option" >&2; exit 2 ;;
+  esac
+done
+
+if ! "$python_scope" && ! "$database_metadata"; then
+  echo "select a purge scope" >&2
+  exit 2
+fi
+
+if ! "$dry_run"; then
+  docker compose stop collector >/dev/null
+fi
+
+if "$python_scope"; then
+  # shellcheck disable=SC2086
+  python3 -m lob_recorder.cli privacy-purge $args \
+    --runtime-root "$data_root/private-runtime" \
+    --spool-root "$data_root/spool" \
+    --credential-file "$credential_file"
+fi
+
+if "$database_metadata"; then
+  if "$dry_run"; then
+    echo "database metadata tables selected; market tables excluded"
+  else
+    if ! "$assume_yes"; then
+      printf 'Database metadata purge removes capture_sessions and capture_gaps only. Type DELETE: '
+      read -r answer
+      test "$answer" = "DELETE" || { echo "cancelled"; exit 1; }
+    fi
+    docker compose exec -T clickhouse clickhouse-client --query \
+      "TRUNCATE TABLE IF EXISTS lob.capture_sessions; TRUNCATE TABLE IF EXISTS lob.capture_gaps"
+  fi
+fi

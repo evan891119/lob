@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shioaji-lob-recorder"
+version = "0.1.0"
+description = "Privacy-conscious Shioaji market-data recorder"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "clickhouse-connect==0.8.18",
+  "duckdb==1.3.2",
+  "pyarrow==21.0.0",
+  "PyYAML==6.0.2",
+  "shioaji==1.5.3",
+]
+
+[project.scripts]
+lob-recorder = "lob_recorder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
