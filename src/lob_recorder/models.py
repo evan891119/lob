@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 TAIPEI_OFFSET = "+08:00"
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def _number(value: Any, default: int | float = 0) -> int | float:
@@ -23,13 +25,22 @@ def _five(values: Any, default: int | float = 0) -> list[int | float]:
 
 def parse_event_ts(value: Any) -> str:
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.isoformat() + TAIPEI_OFFSET
-        return value.isoformat()
-    text = str(value)
-    if not text:
+        parsed = value
+    else:
+        text = str(value)
+        if not text:
+            raise ValueError("event timestamp is required")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("event timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TAIPEI)
+    else:
+        parsed = parsed.astimezone(TAIPEI)
+    if parsed.utcoffset() is None:
         raise ValueError("event timestamp is required")
-    return text
+    return parsed.isoformat()
 
 
 @dataclass(slots=True)
@@ -69,7 +80,16 @@ def normalize(raw: dict[str, Any], session_id: str, sequence_no: int, received: 
     if not symbol:
         raise ValueError("symbol is required")
     event_ts = parse_event_ts(raw.get("event_ts") or raw.get("datetime") or raw.get("ts"))
-    received = received or datetime.now().astimezone()
+    if received is None and raw.get("received_ts"):
+        try:
+            received = datetime.fromisoformat(str(raw["received_ts"]))
+        except ValueError as exc:
+            raise ValueError("received timestamp is invalid") from exc
+    received = received or datetime.now(TAIPEI)
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=TAIPEI)
+    else:
+        received = received.astimezone(TAIPEI)
     payload_keys = {
         "bid_price", "bid_volume", "ask_price", "ask_volume", "diff_bid_vol", "diff_ask_vol",
         "close", "volume", "total_volume", "tick_type", "best_bid_price", "best_bid_volume",

@@ -57,6 +57,9 @@ docker compose up -d --build
 
 確認 `lob.lob_events` 與 `lob.tick_events` 有 fixture rows 後停止。Fixture override 不能用於 live mode。
 
+若要在測試環境持續產生事件以演練 database outage，可額外設定
+`LOB_FIXTURE_REPEAT_SECONDS=0.25`；這是明確的 test-only 開關，正式 live 設定必須移除。
+
 ```bash
 docker compose exec -T clickhouse clickhouse-client --query \
   "SELECT table, total_rows FROM system.tables WHERE database='lob'"
@@ -86,6 +89,11 @@ docker compose exec -T collector lob-recorder export \
   --host clickhouse --symbol 2330 --date 2026-01-02 \
   --output /var/lib/lob/parquet
 
+# 每日匯出當天所有已有資料的公開商品
+docker compose exec -T collector lob-recorder export \
+  --host clickhouse --all-symbols --date 2026-01-02 \
+  --output /var/lib/lob/parquet
+
 docker compose exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/symbol=2330/trading_date=2026-01-02/*.parquet'
 
@@ -108,7 +116,9 @@ LOB_DATA_ROOT=/mnt/lob-data scripts/privacy-purge --database-metadata
 LOB_DATA_ROOT=/mnt/lob-data scripts/privacy-purge --all-private
 ```
 
-`privacy-list` 只列相對檔名、大小、mtime 與命中數，不顯示命中文字。`--all-private` 不刪 spool 或 `lob_events`/`tick_events`。`private-runtime/` 可在 collector 停止後直接整個刪除，下一次 entrypoint 會重建。若 credential 也要刪除，需另外設定 `LOB_CREDENTIAL_FILE` 或使用預設 `/etc/shioaji-lob-recorder/shioaji.env`。
+`privacy-list` 只列相對檔名、大小、mtime 與命中數，不顯示命中文字，並檢查 market spool 的完整 allowlist schema。`--runtime` 會先停止 collector，再清除集中在 `private-runtime/` 的 Shioaji home/contracts/log、collector log/health、audit spool、tmp 與 crash artifacts；下一次 entrypoint 會重建空目錄。`--spool` 是獨立且有資料遺失警告的操作，要求 ClickHouse 正在執行，清除後會留下不含私人內容的 `manual_spool_purge` gap。`--all-private` 不刪 market spool 或 `lob_events`/`tick_events`。若 credential 也要刪除，需另外設定 `LOB_CREDENTIAL_FILE` 或使用預設 `/etc/shioaji-lob-recorder/shioaji.env`。
+
+Shioaji 自身 log 視為不可信 private artifact，預設超過 20 MB 會由 collector 截斷；可用 repo 外 `host.env` 的 `LOB_SHIOAJI_LOG_MAX_BYTES` 調整。若要確定完全移除，停止 collector 後使用 `privacy-purge --runtime`，不要查看或複製 log 內容。
 
 ## 6. 搬移資料根目錄
 

@@ -419,22 +419,23 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 
 | Phase | 狀態 | 已完成證據 | 尚需外部驗收 |
 | --- | --- | --- | --- |
-| Phase 0 | 本機完成 | Git `main`、pinned Python/Docker、Compose config、non-root/read-only fixture container、secret parser、storage fail-closed tests、privacy list/purge、tracked-file scan | Linux 真實 mount/UID/GID 與 host credential mode |
-| Phase 1 | 本機完成；live gate | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、Shioaji callback-before-subscribe adapter、四張 ClickHouse DDL | Shioaji simulation 單商品 login/contract/subscription/market-hours event |
-| Phase 2 | 本機完成；交易時段 gate | bounded queue、batch writer、ClickHouse fixture insert、session/gap、graceful stop、80%/90% logic、bind-mount restart persistence | 完整交易時段 counters/rows 與受控小 filesystem capacity test |
-| Phase 3 | 本機完成；長時間 gate | 多商品 loader、session-down gap、exponential login backoff、durable spool/replay、DB failure/queue/privacy canary tests | Linux database outage、網路斷線、恢復 replay 與多商品長時間測試 |
-| Phase 4 | 工具完成；pilot 待執行 | `pilot-report`、公開指標 JSON、20TB 80%/90% bytes 計算、report template | 3–5 商品至少一完整交易日、建議五日，據實決定 retention/backup |
-| Phase 5 | 本機完成 | symbol/date SQL、Zstd Parquet、DuckDB `union_by_name` query、duplicate/order/sequence gap/crossed book/negative volume checks | 用實際 pilot dataset 重跑並保存結果 |
+| Phase 0 | 本機完成 | Git `main`、fully pinned Python/Docker、Compose config、non-root/read-only fixture container、secret parser、storage fail-closed tests、runtime/spool/database privacy controls、tracked-file scan | Linux 真實 mount/UID/GID 與 host credential mode |
+| Phase 1 | 本機完成；live gate | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、callback-before-subscribe、逐 stream 部分失敗、公開 resolved contract/subscription result allowlist | Shioaji simulation 單商品 login/contract/subscription/market-hours event |
+| Phase 2 | 本機完成；交易時段 gate | bounded queue/batch metrics、ClickHouse fixture insert、session/gap latest views、idempotent migrator、graceful stop、80%/90% logic、bind-mount persistence | 完整交易時段 counters/rows 與受控小 filesystem capacity test |
+| Phase 3 | 本機完成；長時間 gate | 多商品 loader、connection gap/reconnect counter、exponential login backoff、durable market/audit spool、同 process 自動 replay、short Docker outage 與 privacy purge 實測 | 目標 Linux 網路斷線、container restart、長時間 outage/replay 與多商品測試 |
+| Phase 4 | 工具完成；pilot 待執行 | `pilot-report` 實際查詢 ClickHouse、rows/EPS/latency/parts/session/gap、20TB 80%/90% bytes 與 report template | 3–5 商品至少一完整交易日、建議五日，據實決定 retention/backup |
+| Phase 5 | 本機完成 | 全商品日匯出、Zstd Parquet、DuckDB `union_by_name`、duplicate/order/sequence/time gap/timestamp/crossed book/negative volume checks | 用實際 pilot dataset 重跑並保存結果 |
 
 ### 本機驗證摘要
 
-- Host unit tests：15 tests passed；不使用 Shioaji credential。
+- Host unit tests：38 tests passed；不使用 Shioaji credential。
 - Hardened fixture container：UID/GID `10001:10001`、read-only rootfs、`cap_drop: ALL`、`no-new-privileges`、tmpfs `/tmp`。
-- Compose：ClickHouse 與 collector healthy；ClickHouse `8123/9000/9009` 只有 container port，host binding 為空。
-- ClickHouse fixture：BidAsk/Tick 均成功批次寫入；重啟 ClickHouse 後 row counts 保持不變。
-- Failure path：故意 insert failure 時行情事件寫入 spool、`capture_gaps` 留下 allowlist category，log 不含原始 exception message。
-- Research path：兩張 Zstd Parquet 成功匯出；DuckDB 可查；quality 結果為 0 duplicates、0 out-of-order、0 sequence gaps、0 crossed book、0 negative volume。
-- Privacy path：`privacy-list` 對 private runtime、spool 與 database metadata allowlist 通過；runtime purge dry-run/實際清除後 ClickHouse 與 Parquet files 保留。
+- Compose：ClickHouse、idempotent migrator 與 collector 啟動成功；ClickHouse ports 未發布；collector 使用 no logging driver、唯讀 rootfs 與 repo 外 bind root。
+- Clean outage fixture：同一 process 收到 `362` 筆，正常寫入 `326`、spool `36`、replay `36`、drop `0`；唯一 database gap 的 `open_intervals=0`。
+- Session/audit：定期 counters、batch/queue/latency metrics、公開 subscription results 可查；舊 open audit 必須先 replay，closed gap 最後寫入。
+- Research path：全商品日匯出兩張 Zstd Parquet 共 `362` 列；DuckDB 可查；quality 七類 counters 全為 `0`。
+- Pilot tool fixture proof：LOB/Tick 各 `181` rows、compressed bytes `10,316`、fixture latency p50/p95/p99 分別為 `5/5/5 ms` 與 `7/7/7 ms`；20TB decimal usable bytes 對應 80% `16,000,000,000,000`、90% `18,000,000,000,000`。這些 fixture 數字不代表真實市場容量。
+- Privacy path：runtime、market spool schema 與 database metadata allowlist 通過；實際 runtime purge 清除 2 個 test files 後 ClickHouse 與 Parquet 保留。
 
 ### Goal 完成邊界
 

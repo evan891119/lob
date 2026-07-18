@@ -1,6 +1,11 @@
 # Pinned runtime dependencies. Regenerate only after reviewing upstream releases.
 clickhouse-connect==0.8.18
+certifi==2026.6.17
 duckdb==1.3.2
+lz4==4.4.5
 pyarrow==21.0.0
 PyYAML==6.0.2
+pytz==2026.2
 shioaji==1.5.3
+urllib3==2.7.0
+zstandard==0.25.0

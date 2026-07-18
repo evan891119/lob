@@ -11,6 +11,10 @@ __pycache__/
 *.pfx
 *.pem
 *.key
+*.parquet
+*.core
+core.*
+*.dmp
 .coverage
 htmlcov/
 .pytest_cache/

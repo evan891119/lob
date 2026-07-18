@@ -5,6 +5,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+STORAGE_MARKER = "shioaji-lob-recorder-v1"
+
 
 @dataclass(frozen=True, slots=True)
 class Capacity:
@@ -25,6 +27,12 @@ def validate_storage(root: str | Path, mode: str, allow_test: bool = False) -> P
     marker = path / ".lob-storage-root"
     if not path.is_dir() or not marker.is_file():
         raise RuntimeError("storage root or marker is unavailable")
+    try:
+        marker_value = marker.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("storage marker is unreadable") from exc
+    if marker_value != STORAGE_MARKER:
+        raise RuntimeError("storage marker does not match")
     if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
         raise RuntimeError("storage root is not writable")
     if mode == "live" and not os.path.ismount(path):

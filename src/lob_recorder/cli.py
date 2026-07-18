@@ -6,26 +6,38 @@ import os
 import sys
 import tempfile
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 from lob_recorder.collector import Collector, install_signal_handlers
 from lob_recorder.config import load_instruments
 from lob_recorder.credentials import load_credentials
-from lob_recorder.exporter import export_clickhouse
+from lob_recorder.exporter import export_clickhouse, export_day
 from lob_recorder.pilot import collect_report
 from lob_recorder.privacy import correlation_id
-from lob_recorder.privacy_tools import inventory, purge_runtime, purge_spool
+from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
 from lob_recorder.quality import inspect, inspect_parquet
 from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
 from lob_recorder.sources.fixture import FixtureSource
-from lob_recorder.storage import ensure_layout, validate_storage
+from lob_recorder.storage import STORAGE_MARKER, ensure_layout, validate_storage
 
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def build_collector(sink, storage_root: Path) -> Collector:
+def wait_for_stop(signal_event: threading.Event, collector: Collector, timeout: float | None = None) -> bool:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not signal_event.wait(0.25):
+        if collector.stop_requested():
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+    return True
+
+
+def build_collector(sink, storage_root: Path, symbols=()) -> Collector:
     private = Path(env("LOB_PRIVATE_ROOT", str(storage_root / "private-runtime")))
     return Collector(
         sink=sink,
@@ -38,6 +50,10 @@ def build_collector(sink, storage_root: Path) -> Collector:
         storage_root=storage_root,
         warn_percent=float(env("LOB_WARN_PERCENT", "80")),
         stop_percent=float(env("LOB_STOP_PERCENT", "90")),
+        symbols=symbols,
+        simulation=True,
+        untrusted_log_path=os.environ.get("SJ_LOG_PATH"),
+        untrusted_log_max_bytes=int(env("LOB_SHIOAJI_LOG_MAX_BYTES", "20000000")),
     )
 
 
@@ -46,21 +62,31 @@ def run_fixture(fixture: str, output: str, keep_running: bool = False, sink=None
     storage_root = Path(configured_root or tempfile.mkdtemp(prefix="lob-fixture-"))
     allow_test = not configured_root or env("LOB_ALLOW_TEST_STORAGE", "false").lower() == "true"
     storage_root.mkdir(parents=True, exist_ok=True)
-    (storage_root / ".lob-storage-root").touch(mode=0o600, exist_ok=True)
+    if not configured_root:
+        (storage_root / ".lob-storage-root").write_text(STORAGE_MARKER + "\n", encoding="ascii")
     ensure_layout(storage_root)
     validate_storage(storage_root, "fixture", allow_test=allow_test)
-    collector = build_collector(sink or JsonlSink(output), storage_root)
+    raw_events = list(FixtureSource(fixture).events())
+    symbols = sorted({str(raw.get("symbol") or raw.get("code")) for raw in raw_events if raw.get("symbol") or raw.get("code")})
+    collector = build_collector(sink or JsonlSink(output), storage_root, symbols=symbols)
     collector.start()
-    for raw in FixtureSource(fixture).events():
+    for raw in raw_events:
         collector.emit(raw)
     if keep_running:
         stopped = threading.Event()
         install_signal_handlers(stopped.set)
-        stopped.wait()
-    collector.stop()
-    return collector.counters.__dict__ if hasattr(collector.counters, "__dict__") else {
-        name: getattr(collector.counters, name) for name in ("received", "written", "spooled", "replayed", "dropped")
-    }
+        repeat_seconds = float(env("LOB_FIXTURE_REPEAT_SECONDS", "0"))
+        if repeat_seconds < 0:
+            raise ValueError("fixture repeat interval may not be negative")
+        if repeat_seconds:
+            while not wait_for_stop(stopped, collector, repeat_seconds):
+                for raw in raw_events:
+                    collector.emit(raw)
+        else:
+            wait_for_stop(stopped, collector)
+    collector.stop(collector.stop_reason)
+    from dataclasses import asdict
+    return asdict(collector.counters)
 
 
 def run_live() -> None:
@@ -68,35 +94,50 @@ def run_live() -> None:
     instruments = load_instruments(env("LOB_CONFIG", "/app/config/instruments.yaml"))
     credentials = load_credentials(env("LOB_CREDENTIAL_FILE", "/run/secrets/shioaji_credentials"))
     sink = ClickHouseSink(env("LOB_CLICKHOUSE_HOST", "clickhouse"))
-    collector = build_collector(sink, storage_root)
+    collector = build_collector(sink, storage_root, symbols=[instrument.code for instrument in instruments])
     from lob_recorder.sources.shioaji_source import ShioajiSource
     stopped = threading.Event()
     install_signal_handlers(stopped.set)
-    collector.start()
+    collector.start(status="starting")
     source = None
     try:
         retry_seconds = 60
         while not stopped.is_set():
-            source = ShioajiSource(credentials, instruments, collector.emit, lambda: collector.record_gap("connection_down"))
+            source = ShioajiSource(
+                credentials,
+                instruments,
+                collector.emit,
+                on_disconnect=lambda *_args: collector.source_event(12),
+                on_event=collector.source_event,
+            )
             try:
                 results = source.connect()
                 for result in results:
-                    collector.logger.write("subscription_result", symbol=result.code, stream=result.stream, status=result.category)
-                collector.logger.write("subscriptions_ready", status="active", count=sum(result.active for result in results))
+                    collector.logger.write(
+                        "subscription_result", symbol=result.code, stream=result.stream,
+                        status=result.category, exchange=result.exchange,
+                        security_type=result.security_type, resolved_code=result.resolved_code,
+                        target_code=result.target_code,
+                    )
+                active = sum(result.active for result in results)
+                failed = len(results) - active
+                collector.set_subscriptions(active, failed, [result.descriptor() for result in results])
+                collector.logger.write("subscriptions_ready", status="active", count=active)
                 break
             except Exception as exc:
                 collector.logger.write("live_start_failed", level="error", category=type(exc).__name__, correlation_id=correlation_id(exc))
                 collector.record_gap("live_start_failure")
+                collector.set_status("retrying")
                 source.close()
                 source = None
-                if stopped.wait(retry_seconds):
+                if wait_for_stop(stopped, collector, retry_seconds):
                     return
                 retry_seconds = min(retry_seconds * 2, 900)
-        stopped.wait()
+        wait_for_stop(stopped, collector)
     finally:
         if source is not None:
             source.close()
-        collector.stop()
+        collector.stop(collector.stop_reason if collector.stop_requested() else "graceful_stop")
 
 
 def command_run(_args) -> None:
@@ -121,7 +162,7 @@ def command_init_storage(args) -> None:
         raise SystemExit("refusing unsafe storage root")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     ensure_layout(root)
-    (root / ".lob-storage-root").write_text("shioaji-lob-recorder-v1\n", encoding="ascii")
+    (root / ".lob-storage-root").write_text(STORAGE_MARKER + "\n", encoding="ascii")
     print("storage layout initialized")
 
 
@@ -130,7 +171,12 @@ def command_health(args) -> None:
         data = json.loads(Path(args.file).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         raise SystemExit(1)
-    raise SystemExit(0 if data.get("status") == "running" else 1)
+    try:
+        updated = datetime.fromisoformat(data["updated_at"])
+        age = (datetime.now(updated.tzinfo) - updated).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        raise SystemExit(1)
+    raise SystemExit(0 if data.get("status") == "running" and 0 <= age <= args.max_age else 1)
 
 
 def command_privacy_list(args) -> None:
@@ -139,6 +185,8 @@ def command_privacy_list(args) -> None:
             continue
         for item in inventory(root):
             print(json.dumps({"area": area, **item}, sort_keys=True))
+    if args.spool_root:
+        print(json.dumps(inspect_spool_schema(args.spool_root), sort_keys=True))
 
 
 def _confirmed(args, warning: str) -> bool:
@@ -172,12 +220,15 @@ def command_privacy_purge(args) -> None:
 
 
 def command_quality(args) -> None:
-    result = inspect(read_jsonl(args.input)) if args.input else inspect_parquet(args.parquet)
+    result = inspect(read_jsonl(args.input), args.max_gap_seconds) if args.input else inspect_parquet(args.parquet, args.max_gap_seconds)
     print(json.dumps(result, sort_keys=True))
 
 
 def command_export(args) -> None:
-    export_clickhouse(args.host, args.symbol, args.date, args.output)
+    if args.all_symbols:
+        export_day(args.host, args.date, args.output)
+    else:
+        export_clickhouse(args.host, args.symbol, args.date, args.output)
     print("parquet export complete")
 
 
@@ -192,7 +243,7 @@ def parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run"); run.set_defaults(func=command_run)
     fixture = sub.add_parser("fixture"); fixture.add_argument("--input", required=True); fixture.add_argument("--output", required=True); fixture.set_defaults(func=command_fixture)
     init = sub.add_parser("init-storage"); init.add_argument("--root", required=True); init.set_defaults(func=command_init_storage)
-    health = sub.add_parser("health"); health.add_argument("--file", required=True); health.set_defaults(func=command_health)
+    health = sub.add_parser("health"); health.add_argument("--file", required=True); health.add_argument("--max-age", type=float, default=60); health.set_defaults(func=command_health)
     listing = sub.add_parser("privacy-list"); listing.add_argument("--root", required=True); listing.add_argument("--spool-root"); listing.set_defaults(func=command_privacy_list)
     purge = sub.add_parser("privacy-purge")
     purge.add_argument("--runtime", action="store_true"); purge.add_argument("--spool", action="store_true")
@@ -200,8 +251,8 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("--database-metadata", action="store_true", help="handled by scripts/privacy-purge using ClickHouse exec")
     purge.add_argument("--runtime-root", required=True); purge.add_argument("--spool-root", required=True); purge.add_argument("--credential-file", required=True)
     purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
-    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.set_defaults(func=command_quality)
-    export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export.add_argument("--symbol", required=True); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
+    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.set_defaults(func=command_quality)
+    export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
     return result
 

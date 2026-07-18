@@ -6,13 +6,20 @@ tracked="$(git ls-files --cached --others --exclude-standard | sed '/^scripts\/a
 for pattern in \
   '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' \
   'Bearer[[:space:]]+[A-Za-z0-9._~+/-]{16,}' \
+  '(?i)(SJ_API_KEY|SJ_SEC_KEY)=(?!REPLACE_WITH_|<)[^[:space:]]{8,}' \
   '[A-Z][12][0-9]{8}' \
   '/Users/[^/[:space:]]+' \
   '/home/[^/[:space:]]+'; do
-  matches="$(printf '%s\n' "$tracked" | xargs rg -l --no-messages -e "$pattern" || true)"
+  matches="$(printf '%s\n' "$tracked" | xargs rg --pcre2 -l --no-messages -e "$pattern" || true)"
   if test -n "$matches"; then
     printf 'sensitive-pattern candidate files:\n%s\n' "$matches"
     status=1
   fi
 done
+
+unexpected_names="$(printf '%s\n' "$tracked" | rg '(^|/)(shioaji\.env|host\.env|\.env)$' || true)"
+if test -n "$unexpected_names"; then
+  printf 'tracked private-config candidate files:\n%s\n' "$unexpected_names"
+  status=1
+fi
 exit "$status"

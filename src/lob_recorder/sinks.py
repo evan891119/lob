@@ -16,6 +16,8 @@ class JsonlSink:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = Lock()
+        self.sessions_path = self.path.with_name(f"{self.path.stem}.sessions.jsonl")
+        self.gaps_path = self.path.with_name(f"{self.path.stem}.gaps.jsonl")
 
     def write(self, records: list[dict]) -> None:
         with self.lock, self.path.open("a", encoding="utf-8") as handle:
@@ -23,10 +25,14 @@ class JsonlSink:
                 handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
 
     def session(self, record: dict) -> None:
-        return None
+        self._metadata(self.sessions_path, record)
 
     def gap(self, record: dict) -> None:
-        return None
+        self._metadata(self.gaps_path, record)
+
+    def _metadata(self, path: Path, record: dict) -> None:
+        with self.lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
 
 
 class ClickHouseSink:
@@ -43,7 +49,13 @@ class ClickHouseSink:
 
     def __init__(self, host: str, database: str = "lob"):
         import clickhouse_connect
-        self.client = clickhouse_connect.get_client(host=host, database=database)
+        self.client = clickhouse_connect.get_client(
+            host=host,
+            database=database,
+            connect_timeout=5,
+            send_receive_timeout=10,
+        )
+        self.lock = Lock()
 
     @staticmethod
     def _value(column: str, value):
@@ -60,18 +72,21 @@ class ClickHouseSink:
         return value
 
     def write(self, records: list[dict]) -> None:
-        for stream, table, columns in (("bidask", "lob_events", self.LOB_COLUMNS), ("tick", "tick_events", self.TICK_COLUMNS)):
-            selected = [record for record in records if record["stream"] == stream]
-            if selected:
-                self.client.insert(table, [[self._value(c, r.get(c)) for c in columns] for r in selected], column_names=columns)
+        with self.lock:
+            for stream, table, columns in (("bidask", "lob_events", self.LOB_COLUMNS), ("tick", "tick_events", self.TICK_COLUMNS)):
+                selected = [record for record in records if record["stream"] == stream]
+                if selected:
+                    self.client.insert(table, [[self._value(c, r.get(c)) for c in columns] for r in selected], column_names=columns)
 
     def session(self, record: dict) -> None:
         columns = list(record)
-        self.client.insert("capture_sessions", [[self._value(c, record[c]) for c in columns]], column_names=columns)
+        with self.lock:
+            self.client.insert("capture_sessions", [[self._value(c, record[c]) for c in columns]], column_names=columns)
 
     def gap(self, record: dict) -> None:
         columns = list(record)
-        self.client.insert("capture_gaps", [[self._value(c, record[c]) for c in columns]], column_names=columns)
+        with self.lock:
+            self.client.insert("capture_gaps", [[self._value(c, record[c]) for c in columns]], column_names=columns)
 
 
 def read_jsonl(path: str | Path) -> list[dict]:

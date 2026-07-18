@@ -4,28 +4,62 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from lob_recorder.models import TAIPEI
+
+
+def _rows(result) -> list[dict]:
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
 
 def collect_report(host: str, output: str | Path, storage_total: int | None = None) -> Path:
     import clickhouse_connect
-    client = clickhouse_connect.get_client(host=host, database="lob")
-    rows = client.query("""
-        SELECT table, symbol, count() AS rows FROM (
-          SELECT 'lob_events' AS table, symbol FROM lob_events
+
+    client = clickhouse_connect.get_client(
+        host=host,
+        database="lob",
+        connect_timeout=5,
+        send_receive_timeout=30,
+    )
+    market = client.query("""
+        SELECT table, symbol, trading_date, count() AS rows,
+               min(event_ts) AS first_event_ts, max(event_ts) AS last_event_ts,
+               round(if(dateDiff('millisecond', first_event_ts, last_event_ts) > 0,
+                   rows * 1000.0 / dateDiff('millisecond', first_event_ts, last_event_ts), 0), 3) AS average_events_per_second,
+               round(quantileExact(0.50)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p50,
+               round(quantileExact(0.95)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p95,
+               round(quantileExact(0.99)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p99
+        FROM (
+          SELECT 'lob_events' AS table, symbol, trading_date, event_ts, received_ts FROM lob_events
           UNION ALL
-          SELECT 'tick_events' AS table, symbol FROM tick_events
-        ) GROUP BY table, symbol ORDER BY table, symbol
-    """).result_rows
+          SELECT 'tick_events' AS table, symbol, trading_date, event_ts, received_ts FROM tick_events
+        ) GROUP BY table, symbol, trading_date ORDER BY table, symbol, trading_date
+    """)
     parts = client.query("""
-        SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS bytes
+        SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS compressed_bytes
         FROM system.parts
         WHERE active AND database = 'lob' AND table IN ('lob_events', 'tick_events')
         GROUP BY table ORDER BY table
-    """).result_rows
-    total_bytes = sum(int(row[2]) for row in parts)
+    """)
+    sessions = client.query("""
+        SELECT session_id, started_at, ended_at, status, symbols, subscription_results,
+               received, written, spooled, replayed, dropped,
+               reconnects, queue_high_water, batch_count, batch_insert_ms_total, batch_insert_ms_max,
+               callback_latency_ms_max, clock_anomalies
+        FROM capture_sessions_latest ORDER BY started_at
+    """)
+    gaps = client.query("""
+        SELECT category, count() AS intervals, sum(affected_count) AS affected_count,
+               countIf(ended_at IS NULL) AS open_intervals
+        FROM capture_gaps_latest GROUP BY category ORDER BY category
+    """)
+    part_rows = _rows(parts)
+    total_bytes = sum(int(row["compressed_bytes"]) for row in part_rows)
     report = {
-        "generated_at": datetime.now().astimezone().isoformat(),
-        "market_rows": [{"table": row[0], "symbol": row[1], "rows": int(row[2])} for row in rows],
-        "market_parts": [{"table": row[0], "rows": int(row[1]), "compressed_bytes": int(row[2])} for row in parts],
+        "generated_at": datetime.now(TAIPEI).isoformat(),
+        "market": _rows(market),
+        "market_parts": part_rows,
+        "capture_sessions": _rows(sessions),
+        "capture_gaps": _rows(gaps),
         "compressed_bytes": total_bytes,
         "storage": None if storage_total is None else {
             "usable_bytes": storage_total,
@@ -35,5 +69,7 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
     }
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    target.write_text(json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=True, indent=2, default=str) + "\n", encoding="utf-8")
+    temporary.replace(target)
     return target

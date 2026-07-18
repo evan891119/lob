@@ -40,13 +40,14 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      clickhouse:
-        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
     networks: [lob_internal, outbound]
     environment:
       LOB_MODE: ${LOB_MODE:-fixture}
       LOB_CONFIG: /app/config/instruments.yaml
       LOB_FIXTURE: /app/fixtures/events.jsonl
+      LOB_FIXTURE_REPEAT_SECONDS: ${LOB_FIXTURE_REPEAT_SECONDS:-0}
       LOB_CLICKHOUSE_HOST: clickhouse
       LOB_PRIVATE_ROOT: /var/lib/lob/private-runtime
       LOB_SPOOL_ROOT: /var/lib/lob/spool
@@ -59,6 +60,7 @@ services:
       LOB_QUEUE_SIZE: ${LOB_QUEUE_SIZE:-20000}
       LOB_WARN_PERCENT: ${LOB_WARN_PERCENT:-80}
       LOB_STOP_PERCENT: ${LOB_STOP_PERCENT:-90}
+      LOB_SHIOAJI_LOG_MAX_BYTES: ${LOB_SHIOAJI_LOG_MAX_BYTES:-20000000}
       LOB_CREDENTIAL_FILE: /run/secrets/shioaji_credentials
     secrets:
       - shioaji_credentials
@@ -85,6 +87,32 @@ services:
       resources:
         limits:
           memory: ${COLLECTOR_MEMORY_LIMIT:-2G}
+
+  migrator:
+    image: clickhouse/clickhouse-server:25.6.3.116-alpine
+    restart: "no"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks: [lob_internal]
+    volumes:
+      - type: bind
+        source: ./migrations
+        target: /migrations
+        read_only: true
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - >-
+        for file in /migrations/*.sql; do
+          clickhouse-client --host clickhouse --multiquery < "$${file}";
+        done
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: local
+      options:
+        max-size: "1m"
+        max-file: "2"
 
 networks:
   lob_internal:

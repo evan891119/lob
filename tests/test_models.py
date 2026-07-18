@@ -23,3 +23,12 @@ class ModelTests(unittest.TestCase):
     def test_clickhouse_temporal_values_are_typed(self):
         self.assertEqual(ClickHouseSink._value("trading_date", "2026-01-02").isoformat(), "2026-01-02")
         self.assertEqual(ClickHouseSink._value("event_ts", "2026-01-02T09:00:00+08:00").utcoffset().total_seconds(), 28800)
+
+    def test_event_timestamp_is_normalized_to_taipei(self):
+        event = normalize({"stream": "tick", "symbol": "x", "event_ts": "2026-01-02T01:00:00+00:00"}, "s", 1)
+        self.assertEqual(event.event_ts, "2026-01-02T09:00:00+08:00")
+        self.assertEqual(event.trading_date, "2026-01-02")
+
+    def test_rejects_invalid_timestamp(self):
+        with self.assertRaises(ValueError):
+            normalize({"stream": "tick", "symbol": "x", "event_ts": "not-a-time"}, "s", 1)

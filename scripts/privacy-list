@@ -5,8 +5,8 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 export LOB_DATA_ROOT="$1"
 python3 -m lob_recorder.cli privacy-list --root "$1/private-runtime" --spool-root "$1/spool"
 
-expected_sessions='dropped enabled_symbols ended_at received reconnects replayed session_id simulation spooled started_at status written'
-expected_gaps='affected_count category correlation_id ended_at gap_id session_id started_at'
+expected_sessions='batch_count batch_insert_ms_max batch_insert_ms_total callback_latency_ms_max clock_anomalies dropped enabled_symbols ended_at notice_dropped queue_high_water received reconnects replayed session_id simulation spooled started_at status subscription_results subscriptions_active subscriptions_failed symbols updated_at written'
+expected_gaps='affected_count category correlation_id ended_at gap_id session_id started_at updated_at'
 if docker compose ps --status running clickhouse 2>/dev/null | grep -q clickhouse; then
   sessions="$(docker compose exec -T clickhouse clickhouse-client --query "SELECT name FROM system.columns WHERE database='lob' AND table='capture_sessions' ORDER BY name" | tr '\n' ' ' | sed 's/ $//')"
   gaps="$(docker compose exec -T clickhouse clickhouse-client --query "SELECT name FROM system.columns WHERE database='lob' AND table='capture_gaps' ORDER BY name" | tr '\n' ' ' | sed 's/ $//')"

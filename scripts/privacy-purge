@@ -10,12 +10,15 @@ database_metadata=false
 python_scope=false
 dry_run=false
 assume_yes=false
+spool_scope=false
+spool_records=0
 args=""
 for arg in "$@"; do
   case "$arg" in
     --database-metadata) database_metadata=true ;;
     --all-private) args="$args $arg"; python_scope=true; database_metadata=true ;;
-    --runtime|--spool|--credentials) args="$args $arg"; python_scope=true ;;
+    --spool) args="$args $arg"; python_scope=true; spool_scope=true ;;
+    --runtime|--credentials) args="$args $arg"; python_scope=true ;;
     --dry-run) args="$args $arg"; dry_run=true ;;
     --yes) args="$args $arg"; assume_yes=true ;;
     *) echo "unsupported option" >&2; exit 2 ;;
@@ -29,6 +32,12 @@ fi
 
 if ! "$dry_run"; then
   docker compose stop collector >/dev/null
+fi
+
+if "$spool_scope" && ! "$dry_run"; then
+  docker compose ps --status running clickhouse 2>/dev/null | grep -q clickhouse \
+    || { echo "clickhouse must be running so spool deletion can leave a capture gap" >&2; exit 1; }
+  spool_records="$(find "$data_root/spool" -type f -name '*.jsonl*' -exec awk 'END { total += NR } END { print total }' {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')"
 fi
 
 if "$python_scope"; then
@@ -51,4 +60,9 @@ if "$database_metadata"; then
     docker compose exec -T clickhouse clickhouse-client --query \
       "TRUNCATE TABLE IF EXISTS lob.capture_sessions; TRUNCATE TABLE IF EXISTS lob.capture_gaps"
   fi
+fi
+
+if "$spool_scope" && ! "$dry_run"; then
+  docker compose exec -T clickhouse clickhouse-client --query \
+    "INSERT INTO lob.capture_gaps (gap_id, session_id, started_at, ended_at, category, correlation_id, affected_count) SELECT generateUUIDv4(), generateUUIDv4(), now64(6), now64(6), 'manual_spool_purge', '000000000000', toUInt64($spool_records)"
 fi

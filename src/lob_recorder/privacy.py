@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,11 @@ SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"(?i)(SJ_API_KEY|SJ_SEC_KEY)\s*[=:]\s*\S+"),
     re.compile(r"\b[A-Z][12]\d{8}\b"),
 )
-ALLOWED_LOG_FIELDS = {"event", "level", "correlation_id", "session_id", "stream", "symbol", "count", "category", "status", "percent"}
+ALLOWED_LOG_FIELDS = {
+    "event", "level", "correlation_id", "session_id", "stream", "symbol", "count",
+    "category", "status", "percent", "exchange", "security_type", "resolved_code",
+    "target_code",
+}
 
 
 def redact_text(value: Any) -> str:
@@ -24,7 +28,8 @@ def redact_text(value: Any) -> str:
 
 
 def correlation_id(exc: BaseException) -> str:
-    return hashlib.sha256(type(exc).__name__.encode()).hexdigest()[:12]
+    del exc
+    return uuid.uuid4().hex[:12]
 
 
 def safe_fields(fields: dict[str, Any]) -> dict[str, Any]:
