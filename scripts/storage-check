@@ -1,9 +1,29 @@
 #!/bin/sh
 set -eu
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
 test "$#" -eq 1 || { echo "usage: scripts/storage-check ABSOLUTE_DATA_ROOT" >&2; exit 2; }
 root="$1"
 test "${root#/}" != "$root" && test "$root" != "/" || { echo "unsafe storage root" >&2; exit 1; }
-test -f "$root/.lob-storage-root" || { echo "storage marker missing" >&2; exit 1; }
 mountpoint -q "$root" || { echo "storage root is not a mount point" >&2; exit 1; }
-test -r "$root" && test -w "$root" && test -x "$root" || { echo "storage root permission check failed" >&2; exit 1; }
+
+check_meta() {
+  path="$1"
+  expected="$2"
+  test -e "$path" || { echo "storage layout is incomplete" >&2; exit 1; }
+  actual="$(stat -c '%u:%g:%a' "$path")"
+  test "$actual" = "$expected" || { echo "storage ownership or mode check failed" >&2; exit 1; }
+}
+
+check_meta "$root" '0:0:755'
+check_meta "$root/.lob-storage-root" '0:0:644'
+test "$(cat "$root/.lob-storage-root")" = 'shioaji-lob-recorder-v1' \
+  || { echo "storage marker mismatch" >&2; exit 1; }
+check_meta "$root/clickhouse" '101:101:700'
+for path in \
+  "$root/parquet" "$root/spool" "$root/backup" "$root/private-runtime" \
+  "$root/private-runtime/shioaji" "$root/private-runtime/shioaji/home" \
+  "$root/private-runtime/shioaji/contracts" "$root/private-runtime/collector" \
+  "$root/private-runtime/crash" "$root/private-runtime/tmp"; do
+  check_meta "$path" '10001:10001:700'
+done
 echo "storage check passed"

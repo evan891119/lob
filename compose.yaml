@@ -68,6 +68,16 @@ services:
       - type: bind
         source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}
         target: /var/lib/lob
+        read_only: true
+      - type: bind
+        source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}/parquet
+        target: /var/lib/lob/parquet
+      - type: bind
+        source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}/spool
+        target: /var/lib/lob/spool
+      - type: bind
+        source: ${LOB_DATA_ROOT:?set LOB_DATA_ROOT}/private-runtime
+        target: /var/lib/lob/private-runtime
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     read_only: true

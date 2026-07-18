@@ -14,10 +14,10 @@
 ```bash
 findmnt /mnt/lob-data
 sudo scripts/host-prepare /mnt/lob-data
-scripts/storage-check /mnt/lob-data
+sudo scripts/storage-check /mnt/lob-data
 ```
 
-`host-prepare` 會建立 `.lob-storage-root` marker、ClickHouse 目錄及 collector UID `10001` 可寫的 `parquet/`、`spool/`、`backup/`、`private-runtime/`。ClickHouse 目錄依 pinned image UID `101` 設定；升級 image 前需重新確認 UID。
+`host-prepare` 會建立 `.lob-storage-root` marker、ClickHouse 目錄及 UID `10001` 擁有的 `parquet/`、`spool/`、`backup/`、`private-runtime/`。資料根目錄本身由 root 擁有；collector 只讀掛載根目錄，再將 `parquet/`、`spool/`、`private-runtime/` 疊加為可寫 bind mounts，`backup/` 保留給 host 維護流程，不掛成 collector 可寫路徑。因此 collector 不能改名或刪除 ClickHouse/backup 目錄。ClickHouse 目錄依 pinned image UID/GID `101:101` 設定；升級 image 前需重新確認 UID/GID。
 
 ## 2. Repo 外設定與 credential
 
@@ -69,7 +69,7 @@ docker compose down
 正式 simulation market-data collector：
 
 ```bash
-scripts/storage-check /mnt/lob-data
+sudo scripts/storage-check /mnt/lob-data
 docker compose --env-file /etc/shioaji-lob-recorder/host.env config --quiet
 docker compose --env-file /etc/shioaji-lob-recorder/host.env up -d --build
 docker compose --env-file /etc/shioaji-lob-recorder/host.env ps
@@ -98,11 +98,10 @@ docker compose exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/symbol=2330/trading_date=2026-01-02/*.parquet'
 
 docker compose exec -T collector lob-recorder pilot-report \
-  --host clickhouse --output /var/lib/lob/parquet/pilot-report.json \
-  --storage-total-bytes <filesystem-usable-bytes>
+  --host clickhouse --output /var/lib/lob/parquet/pilot-report.json
 ```
 
-Pilot 至少需 3–5 個不同活躍度商品與一個完整交易日；建議五日。把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限。
+未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Pilot 至少需 3–5 個不同活躍度商品與一個完整交易日；建議五日。把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限。
 
 ## 5. 隱私盤點與清除
 
@@ -116,7 +115,7 @@ LOB_DATA_ROOT=/mnt/lob-data scripts/privacy-purge --database-metadata
 LOB_DATA_ROOT=/mnt/lob-data scripts/privacy-purge --all-private
 ```
 
-`privacy-list` 只列相對檔名、大小、mtime 與命中數，不顯示命中文字，並檢查 market spool 的完整 allowlist schema。`--runtime` 會先停止 collector，再清除集中在 `private-runtime/` 的 Shioaji home/contracts/log、collector log/health、audit spool、tmp 與 crash artifacts；下一次 entrypoint 會重建空目錄。`--spool` 是獨立且有資料遺失警告的操作，要求 ClickHouse 正在執行，清除後會留下不含私人內容的 `manual_spool_purge` gap。`--all-private` 不刪 market spool 或 `lob_events`/`tick_events`。若 credential 也要刪除，需另外設定 `LOB_CREDENTIAL_FILE` 或使用預設 `/etc/shioaji-lob-recorder/shioaji.env`。
+管理 script 透過 collector image 執行 inventory/runtime/spool 操作，主機不需要另外安裝 Python dependencies，也不把真實 credential 掛入 management container。`privacy-list` 只列相對檔名、大小、mtime 與命中數，不顯示命中文字，並檢查 market spool 的完整 allowlist schema；`sensitive_hits=-1` 表示檔案超過安全掃描上限或無法讀取，不代表 0 hits。`--runtime` 會先停止 collector，再清除集中在 `private-runtime/` 的 Shioaji home/contracts/log、collector log/health、audit spool、tmp 與 crash artifacts，並保留 bind mount root 的 UID/mode。`--spool` 是獨立且有資料遺失警告的操作，要求 ClickHouse 正在執行，清除後會留下不含私人內容的 `manual_spool_purge` gap。`--all-private` 不刪 market spool 或 `lob_events`/`tick_events`。若 credential 也要刪除，需另外設定 `LOB_CREDENTIAL_FILE` 或使用預設 `/etc/shioaji-lob-recorder/shioaji.env`；host credential 會在其他 Compose 清理完成後才最後 unlink。
 
 Shioaji 自身 log 視為不可信 private artifact，預設超過 20 MB 會由 collector 截斷；可用 repo 外 `host.env` 的 `LOB_SHIOAJI_LOG_MAX_BYTES` 調整。若要確定完全移除，停止 collector 後使用 `privacy-purge --runtime`，不要查看或複製 log 內容。
 
@@ -129,3 +128,5 @@ Shioaji 自身 log 視為不可信 private artifact，預設超過 20 MB 會由 
 5. 啟動後比較 ClickHouse table row counts、Parquet files 與 health。
 
 Credential、`private-runtime/` 預設不隨市場資料備份搬移。若外部 snapshot/backup 已包含它們，privacy purge 不會自動刪除外部副本。
+
+若管理者不用 script、而是直接刪除整個 host `private-runtime/` 或 `spool/` 根目錄，重新啟動前必須再執行 `sudo scripts/host-prepare /mnt/lob-data` 與 `sudo scripts/storage-check /mnt/lob-data`；entrypoint 只會重建 mount root 內的子目錄，不負責修復 host owner/mode。

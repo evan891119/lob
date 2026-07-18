@@ -33,8 +33,12 @@ def validate_storage(root: str | Path, mode: str, allow_test: bool = False) -> P
         raise RuntimeError("storage marker is unreadable") from exc
     if marker_value != STORAGE_MARKER:
         raise RuntimeError("storage marker does not match")
-    if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
-        raise RuntimeError("storage root is not writable")
+    if not os.access(path, os.R_OK | os.X_OK):
+        raise RuntimeError("storage root is not readable")
+    for name in ("parquet", "spool", "private-runtime"):
+        writable = path / name
+        if not writable.is_dir() or not os.access(writable, os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeError("collector storage layout is not writable")
     if mode == "live" and not os.path.ismount(path):
         raise RuntimeError("live storage root is not a mount point")
     if mode != "live" and not allow_test and not os.path.ismount(path):
@@ -49,6 +53,12 @@ def capacity(root: str | Path) -> Capacity:
     inode_total = stats.f_files
     inode_percent = 0.0 if not inode_total else 100.0 * (inode_total - stats.f_ffree) / inode_total
     return Capacity(bytes_percent, inode_percent)
+
+
+def usable_bytes(root: str | Path) -> int:
+    """Capacity accessible to the service, excluding filesystem-reserved free blocks."""
+    usage = shutil.disk_usage(root)
+    return usage.used + usage.free
 
 
 def ensure_layout(root: str | Path) -> None:

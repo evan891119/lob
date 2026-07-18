@@ -94,6 +94,7 @@ class Collector:
         self._next_health = 0.0
         self._next_runtime_log_check = 0.0
         self._last_capacity_level = "ok"
+        self._capacity: Capacity | None = None
         self._health_status = "created"
         self._open_gaps: dict[str, dict] = {}
         self._worker = threading.Thread(target=self._work, name="batch-writer", daemon=True)
@@ -150,8 +151,15 @@ class Collector:
         self.subscriptions_active = active
         self.subscriptions_failed = failed
         self.subscription_results = sorted(set(results))
-        status = "active" if active else "subscription_failed"
-        self._health_status = status if not active else "running"
+        if not active:
+            status = "subscription_failed"
+            self._health_status = status
+        elif failed:
+            status = "degraded"
+            self._health_status = status
+        else:
+            status = "active"
+            self._health_status = "running"
         self._write_health(self._health_status)
         self._session_record(status)
 
@@ -296,7 +304,22 @@ class Collector:
         if not self.storage_root or now < self._next_capacity_check:
             return
         self._next_capacity_check = now + 30
-        used = self.capacity_probe(self.storage_root).used_percent
+        try:
+            measured = self.capacity_probe(self.storage_root)
+        except OSError as exc:
+            cid = correlation_id(exc)
+            self.logger.write(
+                "storage_capacity_check_failed", level="error", category=type(exc).__name__,
+                correlation_id=cid,
+            )
+            self._begin_gap("storage_unavailable", 0, cid)
+            self._stop_reason = "storage_unavailable"
+            self._health_status = "stopping_storage_unavailable"
+            self._write_health(self._health_status)
+            self._stop.set()
+            return
+        self._capacity = measured
+        used = measured.used_percent
         if used >= self.stop_percent:
             if self._last_capacity_level != "stop":
                 self.logger.write("disk_capacity_stop", level="error", category="capacity", percent=round(used, 2))
@@ -336,6 +359,11 @@ class Collector:
             "session_id": self.session_id,
             "queue_size": self.queue.qsize(),
             "queue_capacity": self.queue_size,
+            "storage_capacity": None if self._capacity is None else {
+                "bytes_percent": round(self._capacity.bytes_percent, 3),
+                "inode_percent": round(self._capacity.inode_percent, 3),
+                "used_percent": round(self._capacity.used_percent, 3),
+            },
             "subscriptions_active": self.subscriptions_active,
             "subscriptions_failed": self.subscriptions_failed,
             "subscription_results": self.subscription_results,
@@ -364,7 +392,11 @@ class Collector:
             "dropped": self.counters.dropped,
             "notice_dropped": self.counters.notice_dropped,
             "reconnects": self.reconnects,
+            "queue_capacity": self.queue_size,
             "queue_high_water": self.counters.queue_high_water,
+            "capacity_bytes_percent": None if self._capacity is None else round(self._capacity.bytes_percent, 3),
+            "capacity_inode_percent": None if self._capacity is None else round(self._capacity.inode_percent, 3),
+            "capacity_used_percent": None if self._capacity is None else round(self._capacity.used_percent, 3),
             "batch_count": self.counters.batch_count,
             "batch_insert_ms_total": round(self.counters.batch_insert_ms_total, 3),
             "batch_insert_ms_max": round(self.counters.batch_insert_ms_max, 3),

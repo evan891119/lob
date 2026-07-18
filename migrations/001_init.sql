@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS lob.capture_sessions (
     simulation Bool, status LowCardinality(String), symbols Array(String), enabled_symbols UInt16,
     subscriptions_active UInt16, subscriptions_failed UInt16, subscription_results Array(String),
     received UInt64, written UInt64, spooled UInt64, replayed UInt64, dropped UInt64, notice_dropped UInt64,
-    reconnects UInt32, queue_high_water UInt32, batch_count UInt64,
+    reconnects UInt32, queue_capacity UInt32, queue_high_water UInt32,
+    capacity_bytes_percent Nullable(Float64), capacity_inode_percent Nullable(Float64),
+    capacity_used_percent Nullable(Float64), batch_count UInt64,
     batch_insert_ms_total Float64, batch_insert_ms_max Float64, callback_latency_ms_max Float64,
     clock_anomalies UInt64, updated_at DateTime64(6, 'Asia/Taipei') DEFAULT now64(6)
 ) ENGINE = MergeTree ORDER BY (started_at, session_id);

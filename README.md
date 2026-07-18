@@ -19,7 +19,7 @@ PYTHONPATH=src python3 -m lob_recorder.cli quality \
 
 ```bash
 sudo scripts/host-prepare /mnt/lob-data
-scripts/storage-check /mnt/lob-data
+sudo scripts/storage-check /mnt/lob-data
 docker compose --env-file /etc/shioaji-lob-recorder/host.env config --quiet
 docker compose --env-file /etc/shioaji-lob-recorder/host.env up -d --build
 ```

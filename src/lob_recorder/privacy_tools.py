@@ -28,7 +28,7 @@ def inventory(root: str | Path) -> list[dict]:
         return result
     for file in sorted(path for path in base.rglob("*") if path.is_file()):
         stat = file.stat()
-        hits = 0
+        hits = -1
         if stat.st_size <= 10_000_000:
             try:
                 text = file.read_text(encoding="utf-8", errors="ignore")
@@ -70,7 +70,7 @@ def purge_runtime(root: str | Path, dry_run: bool) -> int:
     base = Path(root)
     files = [path for path in base.rglob("*") if path.is_file()] if base.exists() else []
     if not dry_run:
-        shutil.rmtree(base, ignore_errors=False)
+        _purge_contents(base)
         for name in ("shioaji/home", "shioaji/contracts", "collector", "crash", "tmp"):
             (base / name).mkdir(parents=True, exist_ok=True, mode=0o700)
     return len(files)
@@ -80,6 +80,15 @@ def purge_spool(root: str | Path, dry_run: bool) -> int:
     base = Path(root)
     files = [path for path in base.rglob("*") if path.is_file()] if base.exists() else []
     if not dry_run:
-        shutil.rmtree(base, ignore_errors=False)
+        _purge_contents(base)
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
     return len(files)
+
+
+def _purge_contents(base: Path) -> None:
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for child in base.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=False)
+        else:
+            child.unlink()

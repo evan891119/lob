@@ -4,65 +4,111 @@ set -eu
 data_root="${LOB_DATA_ROOT:-}"
 credential_file="${LOB_CREDENTIAL_FILE:-/etc/shioaji-lob-recorder/shioaji.env}"
 test -n "$data_root" || { echo "LOB_DATA_ROOT is required" >&2; exit 2; }
-export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
+test "${data_root#/}" != "$data_root" && test "$data_root" != "/" \
+  || { echo "unsafe data root" >&2; exit 1; }
 
+runtime_scope=false
+spool_scope=false
+credential_scope=false
 database_metadata=false
-python_scope=false
 dry_run=false
 assume_yes=false
-spool_scope=false
-spool_records=0
-args=""
+selected=false
+
 for arg in "$@"; do
   case "$arg" in
-    --database-metadata) database_metadata=true ;;
-    --all-private) args="$args $arg"; python_scope=true; database_metadata=true ;;
-    --spool) args="$args $arg"; python_scope=true; spool_scope=true ;;
-    --runtime|--credentials) args="$args $arg"; python_scope=true ;;
-    --dry-run) args="$args $arg"; dry_run=true ;;
-    --yes) args="$args $arg"; assume_yes=true ;;
+    --runtime) runtime_scope=true; selected=true ;;
+    --spool) spool_scope=true; selected=true ;;
+    --credentials) credential_scope=true; selected=true ;;
+    --database-metadata) database_metadata=true; selected=true ;;
+    --all-private)
+      runtime_scope=true
+      credential_scope=true
+      database_metadata=true
+      selected=true
+      ;;
+    --dry-run) dry_run=true ;;
+    --yes) assume_yes=true ;;
     *) echo "unsupported option" >&2; exit 2 ;;
   esac
 done
 
-if ! "$python_scope" && ! "$database_metadata"; then
-  echo "select a purge scope" >&2
-  exit 2
-fi
+"$selected" || { echo "select a purge scope" >&2; exit 2; }
+
+confirm() {
+  warning="$1"
+  "$dry_run" && return 0
+  "$assume_yes" && return 0
+  printf '%s Type DELETE: ' "$warning"
+  read -r answer
+  test "$answer" = "DELETE"
+}
 
 if ! "$dry_run"; then
   docker compose stop collector >/dev/null
 fi
 
+spool_records=0
 if "$spool_scope" && ! "$dry_run"; then
   docker compose ps --status running clickhouse 2>/dev/null | grep -q clickhouse \
     || { echo "clickhouse must be running so spool deletion can leave a capture gap" >&2; exit 1; }
   spool_records="$(find "$data_root/spool" -type f -name '*.jsonl*' -exec awk 'END { total += NR } END { print total }' {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')"
 fi
 
-if "$python_scope"; then
+container_args=""
+"$runtime_scope" && container_args="$container_args --runtime"
+"$spool_scope" && container_args="$container_args --spool"
+"$dry_run" && container_args="$container_args --dry-run"
+"$assume_yes" && container_args="$container_args --yes"
+
+if "$runtime_scope" || "$spool_scope"; then
   # shellcheck disable=SC2086
-  python3 -m lob_recorder.cli privacy-purge $args \
-    --runtime-root "$data_root/private-runtime" \
-    --spool-root "$data_root/spool" \
-    --credential-file "$credential_file"
+  LOB_CREDENTIAL_FILE=./secrets/shioaji.env.example \
+  docker compose run --rm --no-deps -T collector privacy-purge $container_args \
+    --runtime-root /var/lib/lob/private-runtime \
+    --spool-root /var/lib/lob/spool \
+    --credential-file /run/secrets/shioaji_credentials
 fi
 
 if "$database_metadata"; then
   if "$dry_run"; then
     echo "database metadata tables selected; market tables excluded"
   else
-    if ! "$assume_yes"; then
-      printf 'Database metadata purge removes capture_sessions and capture_gaps only. Type DELETE: '
-      read -r answer
-      test "$answer" = "DELETE" || { echo "cancelled"; exit 1; }
+    if confirm "Database metadata purge removes capture_sessions and capture_gaps only."; then
+      docker compose exec -T clickhouse clickhouse-client --query \
+        "TRUNCATE TABLE IF EXISTS lob.capture_sessions; TRUNCATE TABLE IF EXISTS lob.capture_gaps"
+    else
+      echo "cancelled"
+      exit 1
     fi
-    docker compose exec -T clickhouse clickhouse-client --query \
-      "TRUNCATE TABLE IF EXISTS lob.capture_sessions; TRUNCATE TABLE IF EXISTS lob.capture_gaps"
   fi
 fi
 
 if "$spool_scope" && ! "$dry_run"; then
   docker compose exec -T clickhouse clickhouse-client --query \
     "INSERT INTO lob.capture_gaps (gap_id, session_id, started_at, ended_at, category, correlation_id, affected_count) SELECT generateUUIDv4(), generateUUIDv4(), now64(6), now64(6), 'manual_spool_purge', '000000000000', toUInt64($spool_records)"
+fi
+
+# Delete the host credential last so earlier Compose operations can still parse
+# the configured file-backed secret source.
+if "$credential_scope"; then
+  case "$credential_file" in
+    /*) ;;
+    *) echo "credential file must be an absolute host path" >&2; exit 1 ;;
+  esac
+  test "$credential_file" != "/" || { echo "unsafe credential path" >&2; exit 1; }
+  if test -e "$credential_file"; then
+    if "$dry_run"; then
+      echo '{"area":"credential","files_selected":1,"dry_run":true}'
+    elif confirm "Credential deletion disables future login."; then
+      test -f "$credential_file" || { echo "credential path is not a regular file" >&2; exit 1; }
+      unlink "$credential_file"
+      echo '{"area":"credential","files_selected":1,"dry_run":false}'
+    else
+      echo "cancelled"
+      exit 1
+    fi
+  else
+    echo "{\"area\":\"credential\",\"files_selected\":0,\"dry_run\":$dry_run}"
+  fi
 fi

@@ -23,6 +23,8 @@ def load_credentials(path: str | Path) -> tuple[str, str]:
         key, separator, value = line.partition("=")
         if not separator or key not in EXPECTED or not value:
             raise RuntimeError("credential file has an invalid schema")
+        if key in values:
+            raise RuntimeError("credential file contains a duplicate key")
         values[key] = value
     if set(values) != EXPECTED or any(value.startswith(PLACEHOLDER) for value in values.values()):
         raise RuntimeError("credential file is incomplete")

@@ -43,7 +43,10 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
     sessions = client.query("""
         SELECT session_id, started_at, ended_at, status, symbols, subscription_results,
                received, written, spooled, replayed, dropped,
-               reconnects, queue_high_water, batch_count, batch_insert_ms_total, batch_insert_ms_max,
+               reconnects, queue_capacity, queue_high_water,
+               round(if(queue_capacity > 0, queue_high_water * 100.0 / queue_capacity, 0), 3) AS queue_high_water_percent,
+               capacity_bytes_percent, capacity_inode_percent, capacity_used_percent,
+               batch_count, batch_insert_ms_total, batch_insert_ms_max,
                callback_latency_ms_max, clock_anomalies
         FROM capture_sessions_latest ORDER BY started_at
     """)

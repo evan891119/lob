@@ -1,11 +1,14 @@
 #!/bin/sh
 set -eu
 test "$#" -eq 1 || { echo "usage: scripts/privacy-list ABSOLUTE_DATA_ROOT" >&2; exit 2; }
-export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
+test "${1#/}" != "$1" && test "$1" != "/" \
+  || { echo "unsafe data root" >&2; exit 1; }
 export LOB_DATA_ROOT="$1"
-python3 -m lob_recorder.cli privacy-list --root "$1/private-runtime" --spool-root "$1/spool"
+LOB_CREDENTIAL_FILE=./secrets/shioaji.env.example \
+docker compose run --rm --no-deps -T collector privacy-list \
+  --root /var/lib/lob/private-runtime --spool-root /var/lib/lob/spool
 
-expected_sessions='batch_count batch_insert_ms_max batch_insert_ms_total callback_latency_ms_max clock_anomalies dropped enabled_symbols ended_at notice_dropped queue_high_water received reconnects replayed session_id simulation spooled started_at status subscription_results subscriptions_active subscriptions_failed symbols updated_at written'
+expected_sessions='batch_count batch_insert_ms_max batch_insert_ms_total callback_latency_ms_max capacity_bytes_percent capacity_inode_percent capacity_used_percent clock_anomalies dropped enabled_symbols ended_at notice_dropped queue_capacity queue_high_water received reconnects replayed session_id simulation spooled started_at status subscription_results subscriptions_active subscriptions_failed symbols updated_at written'
 expected_gaps='affected_count category correlation_id ended_at gap_id session_id started_at updated_at'
 if docker compose ps --status running clickhouse 2>/dev/null | grep -q clickhouse; then
   sessions="$(docker compose exec -T clickhouse clickhouse-client --query "SELECT name FROM system.columns WHERE database='lob' AND table='capture_sessions' ORDER BY name" | tr '\n' ' ' | sed 's/ $//')"

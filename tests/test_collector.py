@@ -125,6 +125,41 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(collector.stop_reason, "disk_capacity")
             collector.stop(collector.stop_reason)
             self.assertEqual(sink.sessions[-1]["status"], "disk_capacity")
+            self.assertEqual(sink.sessions[-1]["capacity_bytes_percent"], 95)
+            self.assertEqual(sink.sessions[-1]["capacity_inode_percent"], 1)
+            self.assertEqual(sink.sessions[-1]["capacity_used_percent"], 95)
+            self.assertEqual(sink.sessions[-1]["queue_capacity"], 20_000)
+
+    def test_inode_capacity_warning_is_reported_separately(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            collector = Collector(
+                RecoveringSink(), root / "spool", root / "log/collector.log", root / "health.json",
+                storage_root=root, capacity_probe=lambda _root: Capacity(10, 85),
+            )
+            collector._check_capacity(time.monotonic())
+            collector._write_health("running")
+            health = json.loads((root / "health.json").read_text())
+            self.assertFalse(collector.stop_requested())
+            self.assertEqual(health["storage_capacity"]["bytes_percent"], 10)
+            self.assertEqual(health["storage_capacity"]["inode_percent"], 85)
+            self.assertEqual(health["storage_capacity"]["used_percent"], 85)
+
+    def test_capacity_probe_failure_stops_fail_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+
+            def unavailable(_root):
+                raise OSError("private filesystem diagnostic")
+
+            collector = Collector(
+                RecoveringSink(), root / "spool", root / "log/collector.log", root / "health.json",
+                storage_root=root, capacity_probe=unavailable,
+            )
+            collector._check_capacity(time.monotonic())
+            self.assertTrue(collector.stop_requested())
+            self.assertEqual(collector.stop_reason, "storage_unavailable")
+            self.assertNotIn("private filesystem diagnostic", (root / "log/collector.log").read_text())
 
     def test_health_contains_metrics_and_is_atomic_json(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -147,6 +182,21 @@ class CollectorTests(unittest.TestCase):
                 sink.sessions[-1]["subscription_results"],
                 ["STK:TSE:2330:tick:2330:subscribed"],
             )
+
+    def test_partial_subscription_failure_is_degraded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            sink = RecoveringSink()
+            collector = Collector(sink, root / "spool", root / "log/collector.log", root / "health.json")
+            collector.start()
+            collector.set_subscriptions(1, 1, [
+                "STK:TSE:2330:bidask:2330:subscribed",
+                "STK:TSE:2330:tick:2330:RuntimeError",
+            ])
+            health = json.loads((root / "health.json").read_text())
+            collector.stop()
+            self.assertEqual(health["status"], "degraded")
+            self.assertIn("degraded", [record["status"] for record in sink.sessions])
 
     def test_untrusted_runtime_log_is_size_limited_without_reading_contents(self):
         with tempfile.TemporaryDirectory() as folder:

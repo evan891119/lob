@@ -11,9 +11,17 @@ mkdir -p "$root/clickhouse" "$root/parquet" "$root/spool" "$root/backup" \
   "$root/private-runtime/shioaji/home" "$root/private-runtime/shioaji/contracts" \
   "$root/private-runtime/collector" "$root/private-runtime/crash" "$root/private-runtime/tmp"
 printf 'shioaji-lob-recorder-v1\n' > "$root/.lob-storage-root"
+
+# The root and marker are generic, read-only deployment metadata. Collector
+# write access is limited to its three dedicated bind-mounted subdirectories.
+chown 0:0 "$root" "$root/.lob-storage-root"
+chmod 0755 "$root"
+chmod 0644 "$root/.lob-storage-root"
 chown 101:101 "$root/clickhouse"
 chmod 0700 "$root/clickhouse"
 chown -R 10001:10001 "$root/parquet" "$root/spool" "$root/backup" "$root/private-runtime"
-chmod 0700 "$root/parquet" "$root/spool" "$root/backup" "$root/private-runtime"
-chmod 0600 "$root/.lob-storage-root"
+chmod 0700 "$root/parquet" "$root/spool" "$root/backup" \
+  "$root/private-runtime" "$root/private-runtime/shioaji" \
+  "$root/private-runtime/shioaji/home" "$root/private-runtime/shioaji/contracts" \
+  "$root/private-runtime/collector" "$root/private-runtime/crash" "$root/private-runtime/tmp"
 echo "host storage prepared"

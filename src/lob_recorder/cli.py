@@ -20,7 +20,7 @@ from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_ru
 from lob_recorder.quality import inspect, inspect_parquet
 from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
 from lob_recorder.sources.fixture import FixtureSource
-from lob_recorder.storage import STORAGE_MARKER, ensure_layout, validate_storage
+from lob_recorder.storage import STORAGE_MARKER, ensure_layout, usable_bytes, validate_storage
 
 
 def env(name: str, default: str) -> str:
@@ -233,7 +233,10 @@ def command_export(args) -> None:
 
 
 def command_pilot_report(args) -> None:
-    collect_report(args.host, args.output, args.storage_total_bytes)
+    storage_bytes = args.storage_total_bytes
+    if storage_bytes is None:
+        storage_bytes = usable_bytes(env("LOB_STORAGE_ROOT", "/var/lib/lob"))
+    collect_report(args.host, args.output, storage_bytes)
     print("pilot report complete")
 
 

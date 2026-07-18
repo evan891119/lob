@@ -19,6 +19,14 @@ class QualityTests(unittest.TestCase):
         }])
         self.assertEqual(result["crossed_book"], 0)
 
+    def test_one_sided_book_is_not_crossed(self):
+        result = inspect([{
+            "stream": "bidask", "session_id": "s", "sequence_no": 1,
+            "symbol": "x", "event_ts": "2026-01-02T09:00:00+08:00",
+            "bid_price_1": 100, "ask_price_1": 0,
+        }])
+        self.assertEqual(result["crossed_book"], 0)
+
     def test_detects_sequence_gap(self):
         result = inspect([
             {"stream": "tick", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "1"},

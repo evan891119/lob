@@ -29,7 +29,10 @@ def inspect(records: Iterable[dict], max_gap_seconds: float = 60.0) -> dict[str,
         if row.get("stream") == "bidask":
             best_bid = row.get("bid_price_1")
             best_ask = row.get("ask_price_1")
-            if best_bid is not None and best_ask is not None and best_bid > best_ask:
+            if (
+                best_bid is not None and best_ask is not None
+                and best_bid > 0 and best_ask > 0 and best_bid > best_ask
+            ):
                 issues["crossed_book"] += 1
 
     for session_rows in sessions.values():

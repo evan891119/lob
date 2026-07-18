@@ -5,7 +5,7 @@ from pathlib import Path
 
 from lob_recorder.credentials import load_credentials
 from lob_recorder.privacy import JsonLogger, safe_fields
-from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime
+from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
 from lob_recorder.models import normalize
 
 
@@ -31,11 +31,23 @@ class PrivacyTests(unittest.TestCase):
             runtime.mkdir(); spool.mkdir()
             (runtime / "sample.log").write_text("Bearer " + "PRIVATE_CANARY_VALUE")
             (spool / "pending.jsonl").write_text("public market event")
+            runtime_inode = runtime.stat().st_ino
             listing = inventory(runtime)
             self.assertEqual(listing[0]["name"], "sample.log")
             self.assertNotIn("PRIVATE_CANARY_VALUE", str(listing))
             purge_runtime(runtime, dry_run=False)
+            self.assertEqual(runtime.stat().st_ino, runtime_inode)
             self.assertTrue((spool / "pending.jsonl").exists())
+
+    def test_spool_purge_preserves_bind_mount_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            spool = Path(folder) / "spool"
+            spool.mkdir()
+            (spool / "pending.jsonl").write_text("{}\n")
+            spool_inode = spool.stat().st_ino
+            self.assertEqual(purge_spool(spool, dry_run=False), 1)
+            self.assertEqual(spool.stat().st_ino, spool_inode)
+            self.assertEqual(list(spool.iterdir()), [])
 
     def test_sensitive_keys_are_not_allowed(self):
         self.assertNotIn("api_key", safe_fields({"api_key": "x", "status": "ok"}))
@@ -45,6 +57,18 @@ class PrivacyTests(unittest.TestCase):
             file = Path(folder) / "credentials"
             file.write_text("SJ_API_KEY=" + "fake-key\n" + "SJ_SEC_KEY=" + "fake-secret\n")
             os.chmod(file, 0o644)
+            with self.assertRaises(RuntimeError):
+                load_credentials(file)
+
+    def test_credential_parser_rejects_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "credentials"
+            file.write_text(
+                "SJ_API_KEY=" + "fake-key\n"
+                + "SJ_API_KEY=" + "second-fake-key\n"
+                + "SJ_SEC_KEY=" + "fake-secret\n"
+            )
+            os.chmod(file, 0o600)
             with self.assertRaises(RuntimeError):
                 load_credentials(file)
 
@@ -62,3 +86,10 @@ class PrivacyTests(unittest.TestCase):
             self.assertEqual(result["records"], 2)
             self.assertEqual(result["violations"], 1)
             self.assertNotIn("PRIVATE_CANARY", str(result))
+
+    def test_large_private_file_is_reported_as_not_scanned(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "large.log").write_bytes(b"x" * 10_000_001)
+            result = inventory(root)
+            self.assertEqual(result[0]["sensitive_hits"], -1)
