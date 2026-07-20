@@ -279,9 +279,20 @@ def command_quality(args) -> None:
 
 def command_export(args) -> None:
     if args.all_symbols:
+        if args.security_type is not None or args.exchange is not None:
+            raise SystemExit("--security-type/--exchange require --symbol")
         export_day(args.host, args.date, args.output)
     else:
-        export_clickhouse(args.host, args.symbol, args.date, args.output)
+        if (args.security_type is None) != (args.exchange is None):
+            raise SystemExit("--security-type and --exchange must be provided together")
+        export_clickhouse(
+            args.host,
+            args.symbol,
+            args.date,
+            args.output,
+            security_type=args.security_type,
+            exchange=args.exchange,
+        )
     print("parquet export complete")
 
 
@@ -363,7 +374,7 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("--runtime-root", required=True); purge.add_argument("--spool-root", required=True); purge.add_argument("--credential-file", required=True)
     purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
     quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.add_argument("--complete-sequence-scope", action="store_true", help="assert that input contains every market event for each included session interval"); quality.set_defaults(func=command_quality)
-    export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
+    export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--security-type", choices=("STK", "FUT", "OPT")); export.add_argument("--exchange"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.add_argument("--start-date", type=date.fromisoformat); pilot.add_argument("--end-date", type=date.fromisoformat); pilot.set_defaults(func=command_pilot_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)

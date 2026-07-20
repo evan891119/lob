@@ -176,12 +176,14 @@ sudo cat /mnt/lob-data/parquet/reboot-report.json
 
 ```bash
 docker compose exec -T clickhouse clickhouse-client \
+  --param_security_type=STK --param_exchange=TSE \
   --param_symbol=2330 --param_trading_date=2026-01-02 \
   --param_start='2026-01-02 09:00:00' --param_end='2026-01-02 13:30:00' \
   < queries/events_by_symbol.sql
 
 docker compose exec -T collector lob-recorder export \
-  --host clickhouse --symbol 2330 --date 2026-01-02 \
+  --host clickhouse --security-type STK --exchange TSE \
+  --symbol 2330 --date 2026-01-02 \
   --output /var/lib/lob/parquet
 
 # 每日匯出當天所有已有資料的公開商品
@@ -190,11 +192,11 @@ docker compose exec -T collector lob-recorder export \
   --output /var/lib/lob/parquet
 
 docker compose exec -T collector lob-recorder quality \
-  --parquet '/var/lib/lob/parquet/symbol=2330/trading_date=2026-01-02/*.parquet'
+  --parquet '/var/lib/lob/parquet/security_type=STK/exchange=TSE/symbol=2330/trading_date=2026-01-02/*.parquet'
 
 # 只有當 pattern 包含該日期所有商品與兩種 stream，才可宣告 sequence scope 完整
 docker compose exec -T collector lob-recorder quality \
-  --parquet '/var/lib/lob/parquet/symbol=*/trading_date=2026-01-02/*.parquet' \
+  --parquet '/var/lib/lob/parquet/security_type=*/exchange=*/symbol=*/trading_date=2026-01-02/*.parquet' \
   --complete-sequence-scope
 
 docker compose exec -T collector lob-recorder pilot-report \
@@ -204,6 +206,8 @@ docker compose exec -T collector lob-recorder pilot-report \
 ```
 
 `sequence_no` 是 collector session 內跨商品、跨 BidAsk/Tick 共用的流水號。單一商品、單一 stream 或其他部分匯出不能判斷缺號；quality report 會 fail closed 輸出 `sequence_scope_complete=false` 與 `sequence_gaps=null`。只有 pattern 確實包含所選 session interval 的所有行情事件時，才可加 `--complete-sequence-scope`；錯把部分資料宣告完整會製造假 sequence gap。Duplicate identity 使用 `session_id + sequence_no`，相同 sequence 即使落在不同 stream 也會被偵測。
+
+新版 Parquet 路徑固定使用 `security_type/exchange/symbol/trading_date` 四層 Hive partitions；`--all-symbols` 也按這個完整公開 market identity 分開匯出。單商品匯出建議同時傳入 `--security-type` 與 `--exchange`；若只給 `--symbol`，工具會先查出該日期所有同代碼 identities，再分別輸出，不會合併到同一檔案。升級前已存在的舊 `symbol/trading_date` exports 不會被自動刪除或改寫；需要新 layout 時從 ClickHouse 重新匯出，並以新版 DuckDB glob 查詢，避免同時讀取新舊副本造成重複。
 
 正式 pilot 必須同時指定 inclusive `--start-date` 與 `--end-date`，讓 market、peak、session 與 gap 只包含該次 pilot 範圍，避免把先前 fixture 或試跑資料混入。只給其中一個日期、日期倒置或非正容量 override 都會 fail closed。完全不指定日期仍可產生全資料庫診斷，但不可作為 scoped pilot 最終容量證據。
 

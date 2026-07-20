@@ -4,7 +4,7 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 96 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 101 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
 - Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
@@ -18,7 +18,7 @@
 - 短時間 database outage：同一 collector process 收到 362 筆，正常寫入 326 筆、spool/replay 36/36、drop 0；唯一 database gap 已關閉。
 - Audit ordering：open gap 先於 market replay，closed gap 最後寫入；恢復後 latest view 不殘留錯誤的 open gap。
 - Zstd Parquet：全商品日匯出 362 列；DuckDB 能以 `union_by_name` 查詢；明確標示完整 sequence scope 後 7 類 quality counters 全為 0。部分商品／stream scope 會輸出 `sequence_gaps=null`，不把其他商品的合法 sequence 誤報為缺號；duplicate identity 使用 session＋sequence，能抓到跨 stream 重複。
-- 查詢 SQL：同一 symbol/date/time range 實際合併回傳 BidAsk 與 Tick event envelope，並以 event/received/session/sequence 穩定排序。
+- 查詢 SQL：同一 security type/exchange/symbol/date/time range 實際合併回傳 BidAsk 與 Tick event envelope，並以 event/received/session/sequence 穩定排序。Parquet exporter 以完整 market identity 查詢及建立 Hive partitions，同代碼跨 STK/FUT/OPT 或 exchange 不會共用輸出檔。
 - Private runtime inventory：containerized management path 不需 host Python；實際 runtime purge 清除 2 個檔案後保留 mount root inode、Parquet 與行情 tables；一筆 spool purge 留下 closed `manual_spool_purge` gap（affected count 1）。
 - Pilot report unit proof：inclusive start/end date 以 ClickHouse typed parameters 限制 market/peak/session/gap，缺單側、倒置範圍及非正容量 fail closed；按 `security_type + exchange + symbol` 合併 average/peak EPS。無日期時使用 exact active parts；日期範圍則按每 table scoped/active rows 比例估算 `bytes_on_disk` 與壓縮前後 data bytes，report 明列 measurement method 並保留 global exact totals。Retention/projection 使用 scoped bytes，另輸出最低／建議 scope，以及明列 20／250 交易日、線性商品數、保守 peak-sum 與單一 full-copy backup 假設的 10／50／100 商品 projections；空資料集衍生值維持 `null`。
 - Acceptance report no-leak proof：health 中注入假的 session/account/unknown canary 後輸出不含原文；health 不可讀時只回傳安全 unavailable 狀態。Wrapper 先以 metadata-only 驗證 repo 外 credential 是絕對路徑、非 symlink regular file 且 owner/mode 精確為 `10001:10001`/`0600`，再執行 storage check、Compose config 與 read-only ClickHouse/health 查詢；錯誤 owner 或 mode 均 fail closed，report 另分開判斷 STK/FUT/OPT 是否各自同時具有 BidAsk/Tick rows。最近已結束 session 會用內部參數化 UUID 直接計算兩張 market table rows，但輸出不含 UUID；rows mismatch 與沒有 completed session 都會讓 reconciliation 明確失敗。
