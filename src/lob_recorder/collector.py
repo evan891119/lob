@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import queue
+import resource
 import signal
+import sys
 import threading
 import time
 import uuid
@@ -33,6 +35,23 @@ class Counters:
     clock_anomalies: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ProcessResources:
+    cpu_seconds: float
+    max_rss_bytes: int
+
+
+def process_resources() -> ProcessResources:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    # Linux reports ru_maxrss in KiB; macOS reports bytes. The deployed
+    # collector is Linux, while this branch keeps host unit tests portable.
+    rss_multiplier = 1 if sys.platform == "darwin" else 1_024
+    return ProcessResources(
+        cpu_seconds=float(usage.ru_utime + usage.ru_stime),
+        max_rss_bytes=max(0, int(usage.ru_maxrss * rss_multiplier)),
+    )
+
+
 class Collector:
     def __init__(
         self,
@@ -50,6 +69,7 @@ class Collector:
         simulation: bool = True,
         replay_interval: float = 5.0,
         capacity_probe: Callable[[str | Path], Capacity] = capacity,
+        resource_probe: Callable[[], ProcessResources] = process_resources,
         untrusted_log_path: str | Path | None = None,
         untrusted_log_max_bytes: int = 20_000_000,
     ):
@@ -75,6 +95,7 @@ class Collector:
         self.warn_percent = warn_percent
         self.stop_percent = stop_percent
         self.capacity_probe = capacity_probe
+        self.resource_probe = resource_probe
         self.untrusted_log_path = Path(untrusted_log_path) if untrusted_log_path else None
         self.untrusted_log_max_bytes = untrusted_log_max_bytes
         self.symbols = sorted(set(symbols))
@@ -97,6 +118,14 @@ class Collector:
         self._capacity: Capacity | None = None
         self._health_status = "created"
         self._health_lock = threading.Lock()
+        self._resource_lock = threading.Lock()
+        try:
+            initial_resources = self.resource_probe()
+        except (OSError, ValueError):
+            initial_resources = ProcessResources(0.0, 0)
+        self._resource_cpu_start = initial_resources.cpu_seconds
+        self._process_cpu_seconds = 0.0
+        self._process_max_rss_bytes = initial_resources.max_rss_bytes
         self._open_gaps: dict[str, dict] = {}
         self._worker = threading.Thread(target=self._work, name="batch-writer", daemon=True)
 
@@ -354,6 +383,7 @@ class Collector:
         import json
 
         with self._health_lock:
+            resources = self._sample_process_resources()
             self.health_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             payload = {
                 "status": status,
@@ -370,6 +400,10 @@ class Collector:
                 "subscriptions_failed": self.subscriptions_failed,
                 "subscription_results": self.subscription_results,
                 "counters": asdict(self.counters),
+                "process_resources": {
+                    "cpu_seconds": resources.cpu_seconds,
+                    "max_rss_bytes": resources.max_rss_bytes,
+                },
             }
             temporary = self.health_path.with_suffix(".tmp")
             temporary.write_text(
@@ -379,6 +413,7 @@ class Collector:
             temporary.replace(self.health_path)
 
     def _session_record(self, status: str, ended: bool = False) -> None:
+        resources = self._sample_process_resources()
         record = {
             "session_id": self.session_id,
             "started_at": self.started_at,
@@ -407,8 +442,29 @@ class Collector:
             "batch_insert_ms_max": round(self.counters.batch_insert_ms_max, 3),
             "callback_latency_ms_max": round(self.counters.callback_latency_ms_max, 3),
             "clock_anomalies": self.counters.clock_anomalies,
+            "process_cpu_seconds": resources.cpu_seconds,
+            "process_max_rss_bytes": resources.max_rss_bytes,
         }
         self._persist_audit("session", record)
+
+    def _sample_process_resources(self) -> ProcessResources:
+        with self._resource_lock:
+            try:
+                measured = self.resource_probe()
+            except (OSError, ValueError):
+                return ProcessResources(
+                    round(self._process_cpu_seconds, 3), self._process_max_rss_bytes
+                )
+            self._process_cpu_seconds = max(
+                self._process_cpu_seconds,
+                measured.cpu_seconds - self._resource_cpu_start,
+            )
+            self._process_max_rss_bytes = max(
+                self._process_max_rss_bytes, measured.max_rss_bytes
+            )
+            return ProcessResources(
+                round(self._process_cpu_seconds, 3), self._process_max_rss_bytes
+            )
 
     def _gap_base(self, category: str, affected_count: int, cid: str) -> dict:
         return {

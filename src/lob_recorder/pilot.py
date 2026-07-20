@@ -190,7 +190,12 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                round(if(queue_capacity > 0, queue_high_water * 100.0 / queue_capacity, 0), 3) AS queue_high_water_percent,
                capacity_bytes_percent, capacity_inode_percent, capacity_used_percent,
                batch_count, batch_insert_ms_total, batch_insert_ms_max,
-               callback_latency_ms_max, clock_anomalies
+               callback_latency_ms_max, clock_anomalies,
+               process_cpu_seconds, process_max_rss_bytes,
+               round(if(dateDiff('millisecond', started_at, ifNull(ended_at, now64(6))) > 0,
+                   process_cpu_seconds * 1000.0 * 100.0 /
+                   dateDiff('millisecond', started_at, ifNull(ended_at, now64(6))), 0), 3)
+                   AS average_process_cpu_percent
         FROM capture_sessions_latest ORDER BY started_at
     """)
     gaps = client.query("""

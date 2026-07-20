@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS lob.capture_sessions (
     capacity_bytes_percent Nullable(Float64), capacity_inode_percent Nullable(Float64),
     capacity_used_percent Nullable(Float64), batch_count UInt64,
     batch_insert_ms_total Float64, batch_insert_ms_max Float64, callback_latency_ms_max Float64,
-    clock_anomalies UInt64, updated_at DateTime64(6, 'Asia/Taipei') DEFAULT now64(6)
+    clock_anomalies UInt64, process_cpu_seconds Float64, process_max_rss_bytes UInt64,
+    updated_at DateTime64(6, 'Asia/Taipei') DEFAULT now64(6)
 ) ENGINE = MergeTree ORDER BY (started_at, session_id);
 
 CREATE TABLE IF NOT EXISTS lob.capture_gaps (

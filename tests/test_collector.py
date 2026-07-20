@@ -5,7 +5,7 @@ import json
 import threading
 from pathlib import Path
 
-from lob_recorder.collector import Collector
+from lob_recorder.collector import Collector, ProcessResources
 from lob_recorder.sinks import JsonlSink, read_jsonl
 from lob_recorder.storage import Capacity
 
@@ -170,6 +170,25 @@ class CollectorTests(unittest.TestCase):
             health = json.loads((root / "health.json").read_text())
             self.assertEqual(health["status"], "stopped")
             self.assertIn("queue_high_water", health["counters"])
+
+    def test_process_resources_are_health_and_session_metrics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            sink = RecoveringSink()
+            current = [ProcessResources(cpu_seconds=10.0, max_rss_bytes=1_024)]
+            collector = Collector(
+                sink, root / "spool", root / "log/collector.log", root / "health.json",
+                resource_probe=lambda: current[0],
+            )
+            current[0] = ProcessResources(cpu_seconds=12.5, max_rss_bytes=4_096)
+            collector.start()
+            collector.stop()
+            health = json.loads((root / "health.json").read_text())
+
+            self.assertEqual(health["process_resources"]["cpu_seconds"], 2.5)
+            self.assertEqual(health["process_resources"]["max_rss_bytes"], 4_096)
+            self.assertEqual(sink.sessions[-1]["process_cpu_seconds"], 2.5)
+            self.assertEqual(sink.sessions[-1]["process_max_rss_bytes"], 4_096)
 
     def test_concurrent_health_writes_share_one_atomic_replace_lock(self):
         with tempfile.TemporaryDirectory() as folder:

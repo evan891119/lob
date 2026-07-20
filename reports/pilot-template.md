@@ -17,6 +17,8 @@
 | callback-to-received latency (ms) | | | |
 | batch insert latency (ms) | | | |
 | queue usage (%) | | | |
+| collector process CPU (%) | | | |
+| collector process max RSS (bytes) | | | |
 
 | 商品 | lob rows/day | tick rows/day | bytes on disk/day | compression ratio |
 | --- | ---: | ---: | ---: | ---: |

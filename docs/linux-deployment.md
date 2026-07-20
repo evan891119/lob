@@ -178,6 +178,8 @@ docker compose exec -T collector lob-recorder pilot-report \
 
 `capacity_projections` 會以觀測到的每商品／交易日磁碟量與 aggregate EPS，等比例推估 10、50、100 商品的每日、20 個交易日、250 個交易日用量，以及一份只包含新行情資料的 full-copy backup 大小。若提供實際 filesystem usable bytes，也會分別估算各商品數量在 90% 水位可保留的交易日數。`estimated_conservative_peak_sum_events_per_second` 是把各 stream 個別尖峰相加的保守上界，不是同一秒實測 aggregate peak；projection 不包含 replication、版本歷史、增量鏈、加密或檔案系統額外開銷。`minimum_dataset_scope_reached=false` 時仍會輸出數學估算供診斷，但不得拿來做最終容量決策。
 
+每個 capture session 另保存 collector process 自該 session 開始的累積 CPU seconds 與 process lifetime max RSS bytes；`pilot-report` 依 session duration 算出 `average_process_cpu_percent`。CPU percent 是整個 process 的平均值，可能因多核心工作超過 100%；max RSS 是高水位而非當下記憶體。這些數字只涵蓋 collector container，不包含 ClickHouse container，因此最終 pilot 還要另記錄 ClickHouse 的 CPU／memory 使用量後才能回答整套主機資源需求。
+
 把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限；空資料集的 ratio、projection values 與 retention days 都會是 `null`，不產生虛構估算。
 
 ## 5. 隱私盤點與清除

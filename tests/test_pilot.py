@@ -49,7 +49,10 @@ class FakeClient:
                 [("lob_events", 100, 1_000, 400, 1_600)],
             )
         if "capture_sessions_latest" in statement:
-            return Result([], [])
+            return Result(
+                ["process_cpu_seconds", "process_max_rss_bytes", "average_process_cpu_percent"],
+                [(25.0, 104_857_600, 12.5)],
+            )
         if "capture_gaps_latest" in statement:
             return Result([], [])
         raise AssertionError("unexpected pilot query")
@@ -71,6 +74,8 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(report["uncompressed_data_bytes"], 1_600)
         self.assertEqual(report["compression_ratio"], 4.0)
         self.assertEqual(report["market_parts"][0]["compression_ratio"], 4.0)
+        self.assertEqual(report["capture_sessions"][0]["process_max_rss_bytes"], 104_857_600)
+        self.assertEqual(report["capture_sessions"][0]["average_process_cpu_percent"], 12.5)
         self.assertFalse(report["pilot_scope"]["minimum_product_count_reached"])
         self.assertEqual(report["storage"]["observed_trading_days"], 1)
         self.assertEqual(report["storage"]["average_bytes_on_disk_per_day"], 1_000)
