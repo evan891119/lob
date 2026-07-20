@@ -32,7 +32,7 @@ class SubscriptionResult:
     security_type: str = ""
 
     def descriptor(self) -> str:
-        resolved = self.resolved_code or self.code
+        resolved = self.target_code or self.resolved_code or self.code
         return ":".join((self.security_type, self.exchange, self.code, self.stream, resolved, self.category))
 
 
@@ -80,6 +80,7 @@ class ShioajiSource:
         for instrument in self.instruments:
             try:
                 contract = self._resolve(instrument)
+                self._register_contract_metadata(instrument, contract)
                 self.contracts.append((instrument, contract))
             except Exception as exc:
                 results.extend(
@@ -195,6 +196,20 @@ class ShioajiSource:
         except (KeyError, TypeError):
             return None
 
+    def _register_contract_metadata(self, item: Instrument, contract) -> None:
+        """Map logical and resolved identifiers before callbacks can arrive."""
+        identifiers = {
+            item.code,
+            str(getattr(contract, "code", "") or ""),
+            str(getattr(contract, "target_code", "") or ""),
+        }
+        for code in identifiers - {""}:
+            existing = self.metadata.get(code)
+            metadata = (item.exchange, item.security_type)
+            if existing is not None and existing != metadata:
+                raise ValueError("resolved contract metadata conflicts with configuration")
+            self.metadata[code] = metadata
+
     @staticmethod
     def _enum_value(value) -> str:
         raw = getattr(value, "value", value)
@@ -218,7 +233,8 @@ class ShioajiSource:
                    "symbol": bidask.code, "event_ts": bidask.datetime,
                    "bid_price": bid_price, "bid_volume": bid_volume,
                    "ask_price": ask_price, "ask_volume": ask_volume,
-                   "diff_bid_vol": list(bidask.diff_bid_vol), "diff_ask_vol": list(bidask.diff_ask_vol),
+                   "diff_bid_vol": list(getattr(bidask, "diff_bid_vol", ())),
+                   "diff_ask_vol": list(getattr(bidask, "diff_ask_vol", ())),
                    "simtrade": bool(getattr(bidask, "simtrade", True)), "intraday_odd": bool(getattr(bidask, "intraday_odd", False))})
 
     def _tick(self, tick, fallback_type):

@@ -34,6 +34,20 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
           SELECT 'tick_events' AS table, symbol, trading_date, event_ts, received_ts FROM tick_events
         ) GROUP BY table, symbol, trading_date ORDER BY table, symbol, trading_date
     """)
+    peaks = client.query("""
+        SELECT table, symbol, trading_date, max(events_in_second) AS peak_events_per_second
+        FROM (
+          SELECT table, symbol, trading_date, toStartOfSecond(event_ts) AS event_second,
+                 count() AS events_in_second
+          FROM (
+            SELECT 'lob_events' AS table, symbol, trading_date, event_ts FROM lob_events
+            UNION ALL
+            SELECT 'tick_events' AS table, symbol, trading_date, event_ts FROM tick_events
+          )
+          GROUP BY table, symbol, trading_date, event_second
+        ) GROUP BY table, symbol, trading_date
+        ORDER BY table, symbol, trading_date
+    """)
     parts = client.query("""
         SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS compressed_bytes
         FROM system.parts
@@ -55,20 +69,40 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                countIf(ended_at IS NULL) AS open_intervals
         FROM capture_gaps_latest GROUP BY category ORDER BY category
     """)
+    market_rows = _rows(market)
+    peak_by_group = {
+        (row["table"], row["symbol"], str(row["trading_date"])): int(row["peak_events_per_second"])
+        for row in _rows(peaks)
+    }
+    for row in market_rows:
+        row["peak_events_per_second"] = peak_by_group.get(
+            (row["table"], row["symbol"], str(row["trading_date"])), 0
+        )
     part_rows = _rows(parts)
     total_bytes = sum(int(row["compressed_bytes"]) for row in part_rows)
+    trading_days = len({str(row["trading_date"]) for row in market_rows})
+    average_bytes_per_day = round(total_bytes / trading_days) if trading_days else 0
+    storage = None
+    if storage_total is not None:
+        stop_bytes = int(storage_total * 0.90)
+        storage = {
+            "usable_bytes": storage_total,
+            "warning_80_bytes": int(storage_total * 0.80),
+            "stop_90_bytes": stop_bytes,
+            "observed_trading_days": trading_days,
+            "average_compressed_bytes_per_day": average_bytes_per_day,
+            "estimated_retention_days_at_90_percent": (
+                stop_bytes // average_bytes_per_day if average_bytes_per_day else None
+            ),
+        }
     report = {
         "generated_at": datetime.now(TAIPEI).isoformat(),
-        "market": _rows(market),
+        "market": market_rows,
         "market_parts": part_rows,
         "capture_sessions": _rows(sessions),
         "capture_gaps": _rows(gaps),
         "compressed_bytes": total_bytes,
-        "storage": None if storage_total is None else {
-            "usable_bytes": storage_total,
-            "warning_80_bytes": int(storage_total * 0.80),
-            "stop_90_bytes": int(storage_total * 0.90),
-        },
+        "storage": storage,
     }
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

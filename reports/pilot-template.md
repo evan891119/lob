@@ -32,6 +32,7 @@
 
 ## 20TB 磁碟估算
 
+- `pilot-report.json` 會提供觀測交易日數、平均壓縮 bytes/day 與到 90% 水位的估計保留天數；資料集為空時保留天數必須是 `null`，不得臆測。
 - filesystem 實際可用容量：
 - 80% warning bytes：`實際可用容量 × 0.80`
 - 90% stop bytes：`實際可用容量 × 0.90`

@@ -4,7 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from lob_recorder.config import Instrument
-from lob_recorder.sources.shioaji_source import ContractLookupError, ShioajiLoginError, ShioajiSource
+from lob_recorder.models import normalize
+from lob_recorder.sources.shioaji_source import (
+    ContractLookupError,
+    ShioajiLoginError,
+    ShioajiSource,
+    SubscriptionResult,
+)
 
 
 class ShioajiSourceTests(unittest.TestCase):
@@ -141,3 +147,67 @@ class ShioajiSourceTests(unittest.TestCase):
             results = source.connect()
         self.assertEqual([result.active for result in results], [False, False])
         self.assertEqual([result.category for result in results], ["RuntimeError", "RuntimeError"])
+
+    def test_continuous_future_callbacks_use_target_metadata_and_optional_diffs(self):
+        events = []
+        instrument = Instrument("TXFR1", "FUT", "TAIFEX", ("bidask", "tick"))
+        contract = SimpleNamespace(
+            code="TXFR1", security_type="FUT", exchange="TAIFEX", target_code="TXF_TEST"
+        )
+        source = ShioajiSource(("fake", "fake"), [instrument], events.append)
+        source._register_contract_metadata(instrument, contract)
+
+        source._fop_bidask(SimpleNamespace(
+            code="TXF_TEST", datetime="2026-01-02T09:00:00+08:00",
+            bid_price=[20000, 19999], bid_volume=[3, 4],
+            ask_price=[20001, 20002], ask_volume=[5, 6], simtrade=True,
+        ))
+        source._fop_tick(SimpleNamespace(
+            code="TXF_TEST", datetime="2026-01-02T09:00:01+08:00",
+            close=20001, volume=1, total_volume=10, tick_type=1, simtrade=True,
+        ))
+
+        self.assertEqual(events[0]["exchange"], "TAIFEX")
+        self.assertEqual(events[0]["security_type"], "FUT")
+        self.assertEqual(events[0]["symbol"], "TXF_TEST")
+        self.assertEqual(events[0]["diff_bid_vol"], [])
+        self.assertEqual(events[0]["diff_ask_vol"], [])
+        self.assertEqual(events[1]["best_bid_price"], 20000)
+        self.assertEqual(events[1]["best_ask_volume"], 5)
+        record = normalize(
+            events[0], "00000000-0000-0000-0000-000000000001", 1
+        ).to_record()
+        self.assertEqual(record["diff_bid_vol_1"], 0)
+        self.assertEqual(record["diff_ask_vol_5"], 0)
+        result = SubscriptionResult(
+            "TXFR1", "bidask", True, "subscribed", "TXFR1", "TXF_TEST", "TAIFEX", "FUT"
+        )
+        self.assertEqual(
+            result.descriptor(), "FUT:TAIFEX:TXFR1:bidask:TXF_TEST:subscribed"
+        )
+
+    def test_option_callback_uses_configured_security_type(self):
+        events = []
+        instrument = Instrument("TXO_TEST", "OPT", "TAIFEX", ("tick",))
+        contract = SimpleNamespace(
+            code="TXO_TEST", security_type="OPT", exchange="TAIFEX", target_code=None
+        )
+        source = ShioajiSource(("fake", "fake"), [instrument], events.append)
+        source._register_contract_metadata(instrument, contract)
+
+        source._fop_tick(SimpleNamespace(
+            code="TXO_TEST", datetime="2026-01-02T09:00:01+08:00",
+            close=100, volume=1, total_volume=2, tick_type=2, simtrade=True,
+        ))
+
+        self.assertEqual(events[0]["exchange"], "TAIFEX")
+        self.assertEqual(events[0]["security_type"], "OPT")
+
+    def test_conflicting_resolved_identifier_is_rejected(self):
+        stock = Instrument("2330", "STK", "TSE", ("tick",))
+        future = Instrument("TXFR1", "FUT", "TAIFEX", ("tick",))
+        source = ShioajiSource(("fake", "fake"), [stock, future], lambda _event: None)
+        contract = SimpleNamespace(code="TXFR1", target_code="2330")
+
+        with self.assertRaises(ValueError):
+            source._register_contract_metadata(future, contract)

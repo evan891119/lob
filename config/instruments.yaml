@@ -5,3 +5,11 @@ instruments:
     enabled: true
     streams: ["bidask", "tick"]
     intraday_odd: false
+
+  # Continuous near-month Taiwan index futures (大台). Keep disabled until the
+  # deployment has futures market-data access and is ready for a separate test.
+  - code: "TXFR1"
+    security_type: "FUT"
+    exchange: "TAIFEX"
+    enabled: false
+    streams: ["bidask", "tick"]

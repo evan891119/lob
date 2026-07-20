@@ -415,31 +415,32 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 - [ClickHouse MergeTree](https://clickhouse.com/docs/engines/table-engines/mergetree-family/mergetree)
 - [DuckDB Parquet](https://duckdb.org/docs/stable/data/parquet/overview)
 
-## 15. 執行狀態（2026-07-18）
+## 15. 執行狀態（2026-07-20）
 
 本節是 goal 執行進度的唯一狀態表。`本機完成` 代表不需要真實 credential、交易時段或目標 Linux mount 的部分已實作並驗證；`外部驗收` 只能由部署者在目標 Linux/Shioaji 環境完成，不得用 fixture 結果冒充。
 
 | Phase | 狀態 | 已完成證據 | 尚需外部驗收 |
 | --- | --- | --- | --- |
 | Phase 0 | 本機完成 | Git `main`、fully pinned Python/Docker、Compose config、non-root/read-only fixture container、root RO + nested RW mounts、Linux tmpfs UID/mode/marker/live fail-closed、containerized privacy controls、tracked-file scan | 目標 Linux 20TB mount/UUID 與 host credential mode |
-| Phase 1 | 本機完成；live gate | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、callback-before-subscribe、逐 stream 部分失敗、Shioaji 1.5 uppercase 與新版 lowercase contract facade 相容、公開 resolved contract/subscription result allowlist | 修正版 Shioaji simulation 單商品 contract/subscription/market-hours event |
-| Phase 2 | 本機完成；交易時段 gate | bounded queue/batch metrics、bytes/inode capacity gauges、ClickHouse fixture insert、session/gap latest views、idempotent migrator、graceful stop、93.82% Linux tmpfs capacity stop、bind-mount persistence | 完整交易時段 counters/rows 與目標 20TB filesystem 實測 |
-| Phase 3 | 本機完成；長時間 gate | 多商品 loader、connection gap/reconnect counter、exponential login backoff、durable market/audit spool、同 process 自動 replay、short Docker outage 與 privacy purge 實測 | 目標 Linux 網路斷線、container restart、長時間 outage/replay 與多商品測試 |
-| Phase 4 | 工具完成；pilot 待執行 | `pilot-report` 實際查詢 ClickHouse、rows/EPS/latency/parts/session/gap、20TB 80%/90% bytes 與 report template | 3–5 商品至少一完整交易日、建議五日，據實決定 retention/backup |
+| Phase 1 | 完成（本機＋部署者 live 驗收） | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、callback-before-subscribe、逐 stream 部分失敗、Shioaji 1.5 uppercase 與新版 lowercase contract facade 相容；部署者確認目標 Linux simulation collector 已持續收到並寫入單一股票行情 | 無；FUT/OPT 與多商品外部驗收列在 Phase 3 |
+| Phase 2 | 本機完成；交易時段 gate | bounded queue/batch metrics、bytes/inode capacity gauges、ClickHouse fixture insert、session/gap latest views、idempotent migrator、graceful stop、93.82% Linux tmpfs capacity stop、bind-mount persistence；部署者已確認 live rows 寫入 | 完整交易時段 counters/rows、重啟後持久性與目標 20TB filesystem 實測 |
+| Phase 3 | 本機完成；長時間 gate | 多商品 loader、FUT/OPT callbacks、`TXFR1` logical/resolved/target metadata mapping、FOP optional diff handling、connection gap/reconnect counter、exponential login backoff、durable market/audit spool、同 process 自動 replay、short Docker outage 與 privacy purge 實測 | 目標 Linux FUT/OPT、多商品、網路斷線、container restart、長時間 outage/replay 測試 |
+| Phase 4 | 工具完成；pilot 待執行 | `pilot-report` 查詢 ClickHouse rows、平均/尖峰 EPS、latency、parts、session/gap，並用實際可用容量與觀測壓縮 bytes/day 估算 80%/90% 水位及 retention days | 3–5 商品至少一完整交易日、建議五日，據實決定 retention/backup |
 | Phase 5 | 本機完成 | BidAsk+Tick 時間區間 event query、全商品日匯出、Zstd Parquet、DuckDB `union_by_name`、duplicate/order/sequence/time gap/timestamp/crossed book/negative volume checks | 用實際 pilot dataset 重跑並保存結果 |
 
 ### 本機驗證摘要
 
-- Host unit tests：52 tests passed；不使用 Shioaji credential，包含 Shioaji 1.5 legacy contract lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗診斷。
+- Host unit tests：57 tests passed；不使用 Shioaji credential，包含 Shioaji 1.5 legacy contract lookup、FUT/OPT target metadata、FOP optional fields、safe login/lookup category、全訂閱失敗診斷與 pilot retention 邊界。
+- Target Linux live gate（部署者提供的外部證據）：simulation collector 已持續收到並寫入單一股票行情；Codex 未直接存取該主機，也未保存任何 credential 或私人 runtime output。
 - Hardened fixture container：UID/GID `10001:10001`、read-only rootfs、`cap_drop: ALL`、`no-new-privileges`、tmpfs `/tmp`。
 - Linux storage proof：獨立 tmpfs 上 `host-prepare`/`storage-check` 通過；root/marker 為 root-owned read-only metadata，UID 10001 只能寫三個 nested mounts，普通目錄 live validation 被拒絕；16MB tmpfs 93.82% 時觸發 `disk_capacity` stop。
 - Compose：ClickHouse、idempotent migrator 與 collector 啟動成功；ClickHouse ports 未發布；collector 使用 no logging driver、唯讀 rootfs 與 repo 外 bind root。
 - Clean outage fixture：同一 process 收到 `362` 筆，正常寫入 `326`、spool `36`、replay `36`、drop `0`；唯一 database gap 的 `open_intervals=0`。
 - Session/audit：定期 counters、batch/queue/latency metrics、公開 subscription results 可查；舊 open audit 必須先 replay，closed gap 最後寫入。
 - Research path：全商品日匯出兩張 Zstd Parquet 共 `362` 列；DuckDB 可查；quality 七類 counters 全為 `0`。
-- Pilot tool fixture proof：LOB/Tick 各 `181` rows、compressed bytes `10,316`、fixture latency p50/p95/p99 分別為 `5/5/5 ms` 與 `7/7/7 ms`；20TB decimal usable bytes 對應 80% `16,000,000,000,000`、90% `18,000,000,000,000`。這些 fixture 數字不代表真實市場容量。
+- Pilot tool fixture proof：LOB/Tick 各 `181` rows、compressed bytes `10,316`、fixture latency p50/p95/p99 分別為 `5/5/5 ms` 與 `7/7/7 ms`；工具另輸出每商品/日期 peak EPS、觀測交易日、平均 compressed bytes/day 與 90% 水位 retention days。20TB decimal usable bytes 對應 80% `16,000,000,000,000`、90% `18,000,000,000,000`。這些 fixture 數字不代表真實市場容量。
 - Privacy path：management container 固定使用 placeholder secret；runtime、market spool schema 與 database metadata allowlist 通過；實際 runtime purge 保留 bind root/Parquet/ClickHouse，一筆 spool purge 留下 affected count 1 的 closed gap。
 
 ### Goal 完成邊界
 
-Source、fixture、Docker/Compose 與本機可重現驗證已完成。目標 Linux 曾確認 Shioaji 1.5.3 simulation login 可進入 contract stage，並發現該 runtime 不支援原先只使用新版 lowercase contract facade 的做法；本機已加入 1.5 legacy facade fallback，但仍須在目標 Linux 重建 image 後重新驗證 contract、subscription 與行情寫入。整體 goal 仍需 Shioaji 行情權限與交易時段才能完成 live gate；在這些條件提供前，不把 Phase 1–4 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。
+Source、fixture、Docker/Compose 與本機可重現驗證已完成，單一股票的目標 Linux live gate 亦已由部署者確認。整體 goal 尚未完成：仍需目標 20TB filesystem 的 mount/reboot 證據、FUT/OPT 與多商品行情驗收、完整交易時段/重啟/長時間 outage 測試，以及 3–5 商品 pilot 與實際 retention/backup 決策。在這些條件完成前，不把 Phase 0、2、3、4 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。
