@@ -31,6 +31,36 @@ def _token(value: Any) -> str:
     return text
 
 
+def _session_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": _token(row["status"]),
+        "simulation": bool(row["simulation"]),
+        "symbols": [_token(value) for value in row["symbols"]],
+        "enabled_symbols": int(row["enabled_symbols"]),
+        "subscriptions_active": int(row["subscriptions_active"]),
+        "subscriptions_failed": int(row["subscriptions_failed"]),
+        "subscription_results": [_token(value) for value in row["subscription_results"]],
+        "received": int(row["received"]),
+        "written": int(row["written"]),
+        "spooled": int(row["spooled"]),
+        "replayed": int(row["replayed"]),
+        "dropped": int(row["dropped"]),
+        "notice_dropped": int(row["notice_dropped"]),
+        "reconnects": int(row["reconnects"]),
+        "queue_capacity": int(row["queue_capacity"]),
+        "queue_high_water": int(row["queue_high_water"]),
+        "capacity_bytes_percent": row["capacity_bytes_percent"],
+        "capacity_inode_percent": row["capacity_inode_percent"],
+        "capacity_used_percent": row["capacity_used_percent"],
+        "batch_count": int(row["batch_count"]),
+        "batch_insert_ms_max": float(row["batch_insert_ms_max"]),
+        "callback_latency_ms_max": float(row["callback_latency_ms_max"]),
+        "clock_anomalies": int(row["clock_anomalies"]),
+        "started_at": str(row["started_at"]),
+        "ended_at": None if row["ended_at"] is None else str(row["ended_at"]),
+    }
+
+
 def _health_summary(path: str | Path, max_age_seconds: float) -> dict[str, Any]:
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -130,6 +160,18 @@ def collect_acceptance_report(
         FROM capture_sessions_latest
         ORDER BY started_at DESC LIMIT 1
     """)
+    completed_session_result = client.query("""
+        SELECT session_id, status, simulation, symbols, enabled_symbols,
+               subscriptions_active, subscriptions_failed, subscription_results,
+               received, written, spooled, replayed, dropped, notice_dropped,
+               reconnects, queue_capacity, queue_high_water,
+               capacity_bytes_percent, capacity_inode_percent, capacity_used_percent,
+               batch_count, batch_insert_ms_max, callback_latency_ms_max, clock_anomalies,
+               started_at, ended_at
+        FROM capture_sessions_latest
+        WHERE ended_at IS NOT NULL
+        ORDER BY ended_at DESC LIMIT 1
+    """)
     gaps_result = client.query("""
         SELECT category, count() AS intervals,
                countIf(ended_at IS NULL) AS open_intervals,
@@ -161,36 +203,24 @@ def collect_acceptance_report(
         for row in _rows(symbols_result)
     ]
     session_rows = _rows(session_result)
-    session = None
-    if session_rows:
-        row = session_rows[0]
-        session = {
-            "status": _token(row["status"]),
-            "simulation": bool(row["simulation"]),
-            "symbols": [_token(value) for value in row["symbols"]],
-            "enabled_symbols": int(row["enabled_symbols"]),
-            "subscriptions_active": int(row["subscriptions_active"]),
-            "subscriptions_failed": int(row["subscriptions_failed"]),
-            "subscription_results": [_token(value) for value in row["subscription_results"]],
-            "received": int(row["received"]),
-            "written": int(row["written"]),
-            "spooled": int(row["spooled"]),
-            "replayed": int(row["replayed"]),
-            "dropped": int(row["dropped"]),
-            "notice_dropped": int(row["notice_dropped"]),
-            "reconnects": int(row["reconnects"]),
-            "queue_capacity": int(row["queue_capacity"]),
-            "queue_high_water": int(row["queue_high_water"]),
-            "capacity_bytes_percent": row["capacity_bytes_percent"],
-            "capacity_inode_percent": row["capacity_inode_percent"],
-            "capacity_used_percent": row["capacity_used_percent"],
-            "batch_count": int(row["batch_count"]),
-            "batch_insert_ms_max": float(row["batch_insert_ms_max"]),
-            "callback_latency_ms_max": float(row["callback_latency_ms_max"]),
-            "clock_anomalies": int(row["clock_anomalies"]),
-            "started_at": str(row["started_at"]),
-            "ended_at": None if row["ended_at"] is None else str(row["ended_at"]),
-        }
+    session = _session_summary(session_rows[0]) if session_rows else None
+    completed_rows = _rows(completed_session_result)
+    completed_session = None
+    if completed_rows:
+        completed_row = completed_rows[0]
+        completed_session = _session_summary(completed_row)
+        completed_counts = client.query("""
+            SELECT
+              (SELECT count() FROM lob_events WHERE session_id = {session_id:UUID})
+              + (SELECT count() FROM tick_events WHERE session_id = {session_id:UUID})
+                AS market_rows,
+              (SELECT countIf(ended_at IS NULL) FROM capture_gaps_latest
+               WHERE session_id = {session_id:UUID}) AS open_gaps
+        """, parameters={"session_id": str(completed_row["session_id"])})
+        count_rows = _rows(completed_counts)
+        if count_rows:
+            completed_session["market_rows"] = int(count_rows[0]["market_rows"])
+            completed_session["open_gaps"] = int(count_rows[0]["open_gaps"])
     gaps = [
         {
             "category": _token(row["category"]),
@@ -213,6 +243,19 @@ def collect_acceptance_report(
         )
         for security_type in ("STK", "FUT", "OPT")
     }
+    completed_rows_reconciled = bool(
+        completed_session
+        and completed_session.get("market_rows") == completed_session["received"]
+    )
+    completed_no_drops = bool(
+        completed_session
+        and completed_session["dropped"] == 0
+        and completed_session["notice_dropped"] == 0
+    )
+    completed_no_open_gaps = bool(
+        completed_session and completed_session.get("open_gaps") == 0
+    )
+    completed_simulation = bool(completed_session and completed_session["simulation"])
     checks = {
         "health_fresh": bool(health["fresh"]),
         "collector_operational": health["status"] in {"running", "degraded"},
@@ -224,6 +267,17 @@ def collect_acceptance_report(
         "futures_both_streams_present": streams_by_security_type["FUT"],
         "options_both_streams_present": streams_by_security_type["OPT"],
         "current_session_no_drops": bool(session and session["dropped"] == 0),
+        "completed_session_available": bool(completed_session),
+        "completed_session_simulation_only": completed_simulation,
+        "completed_session_rows_reconciled": completed_rows_reconciled,
+        "completed_session_no_drops": completed_no_drops,
+        "completed_session_no_open_gaps": completed_no_open_gaps,
+        "completed_session_reconciled": (
+            completed_simulation
+            and completed_rows_reconciled
+            and completed_no_drops
+            and completed_no_open_gaps
+        ),
         "no_open_gaps": all(row["open_intervals"] == 0 for row in gaps),
         "storage_below_stop_threshold": bool(capacity and capacity["used_percent"] < 90),
         "pilot_scope_reached": int(totals["symbols"]) >= 3 and int(totals["trading_days"]) >= 1,
@@ -241,6 +295,7 @@ def collect_acceptance_report(
             "by_symbol": symbols,
         },
         "latest_session": session,
+        "latest_completed_session": completed_session,
         "gaps": gaps,
         "checks": checks,
     }
