@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from lob_recorder.acceptance import collect_acceptance_report, write_acceptance_report
 from lob_recorder.collector import Collector, install_signal_handlers
 from lob_recorder.config import load_instruments
 from lob_recorder.credentials import load_credentials
@@ -242,6 +243,18 @@ def command_pilot_report(args) -> None:
     print("pilot report complete")
 
 
+def command_acceptance_report(args) -> None:
+    try:
+        report = collect_acceptance_report(args.host, args.health_file, args.max_health_age)
+        if args.output:
+            write_acceptance_report(report, args.output)
+            print("acceptance report complete")
+        else:
+            print(json.dumps(report, ensure_ascii=True, sort_keys=True, default=str))
+    except Exception as exc:
+        raise SystemExit(f"acceptance report failed: {type(exc).__name__}") from None
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="lob-recorder")
     sub = result.add_subparsers(dest="command", required=True)
@@ -259,6 +272,7 @@ def parser() -> argparse.ArgumentParser:
     quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.set_defaults(func=command_quality)
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
+    acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     return result
 
 

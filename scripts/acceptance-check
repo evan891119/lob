@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 2 || { echo "usage: sudo scripts/acceptance-check ABSOLUTE_DATA_ROOT HOST_ENV_FILE" >&2; exit 2; }
+
+data_root="$1"
+host_env="$2"
+test "${data_root#/}" != "$data_root" && test "$data_root" != "/" \
+  || { echo "unsafe data root" >&2; exit 1; }
+test -f "$host_env" || { echo "host config is unavailable" >&2; exit 1; }
+configured_root="$(sed -n 's/^LOB_DATA_ROOT=//p' "$host_env")"
+test -n "$configured_root" && test "$(printf '%s\n' "$configured_root" | wc -l | tr -d ' ')" -eq 1 \
+  || { echo "host config must contain one plain LOB_DATA_ROOT value" >&2; exit 1; }
+test "$configured_root" = "$data_root" \
+  || { echo "data root does not match host config" >&2; exit 1; }
+
+scripts/storage-check "$data_root"
+docker compose --env-file "$host_env" config --quiet
+docker compose --env-file "$host_env" exec -T collector \
+  lob-recorder acceptance-report \
+  --host clickhouse \
+  --health-file /var/lib/lob/private-runtime/collector/health.json \
+  --output /var/lib/lob/parquet/acceptance-report.json
+
+echo "acceptance check complete; report written to the data-root parquet area"

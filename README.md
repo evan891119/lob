@@ -22,6 +22,7 @@ sudo scripts/host-prepare /mnt/lob-data
 sudo scripts/storage-check /mnt/lob-data
 docker compose --env-file /etc/shioaji-lob-recorder/host.env config --quiet
 docker compose --env-file /etc/shioaji-lob-recorder/host.env up -d --build
+sudo scripts/acceptance-check /mnt/lob-data /etc/shioaji-lob-recorder/host.env
 ```
 
 正式啟動前必須由部署者在 repo 外建立 `/etc/shioaji-lob-recorder/host.env` 與 mode `0600` 的 `/etc/shioaji-lob-recorder/shioaji.env`。不要把真實值貼進 issue、commit、shell command 或對話。

@@ -83,6 +83,19 @@ Pinned Shioaji 1.5.3 在部分 Linux runtime 使用 uppercase `api.Contracts`，
 
 `config/instruments.yaml` 提供預設停用的 `TXFR1`（大台連續近月）範例。確認部署帳戶具有期貨行情權限後，將該項目的 `enabled` 改成 `true`；若只要期貨，可同時停用股票項目，再使用 `up -d --build` 重建 collector。FUT/OPT 共用 Shioaji FOP callbacks；collector 會保留設定中的 logical alias，並把 callback 回傳的實際到期合約代碼存入行情 `symbol`，兩者的對應會留在公開的 subscription result。股票、期貨與選擇權寫入相同兩張 event tables，但可用 `security_type`、`exchange` 與 `symbol` 明確區分，不會無法辨識地混在一起。
 
+### 唯讀驗收摘要
+
+Collector 運行時，可用一條指令同時重跑 storage ownership/mount、Compose config，並從 health 與 ClickHouse allowlist 產生技術摘要：
+
+```bash
+sudo scripts/acceptance-check /mnt/lob-data /etc/shioaji-lob-recorder/host.env
+sudo cat /mnt/lob-data/parquet/acceptance-report.json
+```
+
+工具不會停止、重啟或清除服務，也不會讀取 Shioaji 原始 log。Report 不包含 session ID、credential、帳戶、主機名稱或 host path；只包含公開商品、rows、時間範圍、simulation/subscription 狀態、queue/capacity counters 與彙總 gap。`checks` 中的 `health_fresh`、`collector_operational`、`simulation_only`、`subscriptions_active`、`both_streams_present`、`current_session_no_drops`、`no_open_gaps` 與 `storage_below_stop_threshold` 用於當下檢查；`pilot_scope_reached` 只有至少三個商品及一個交易日才會成立。
+
+這份摘要只能保存執行當下的證據，不能單獨證明重新開機後 mount 持續存在、完整交易時段、刻意斷線/outage recovery 或多日 pilot；這些 gate 必須在相應操作之後重新執行並由部署者確認。
+
 ## 4. 查詢、匯出與品質
 
 ```bash
