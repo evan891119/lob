@@ -422,7 +422,7 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 | Phase | 狀態 | 已完成證據 | 尚需外部驗收 |
 | --- | --- | --- | --- |
 | Phase 0 | 本機完成 | Git `main`、fully pinned Python/Docker、Compose config、non-root/read-only fixture container、root RO + nested RW mounts、Linux tmpfs UID/mode/marker/live fail-closed、containerized privacy controls、tracked-file scan | 目標 Linux 20TB mount/UUID 與 host credential mode |
-| Phase 1 | 本機完成；live gate | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、callback-before-subscribe、逐 stream 部分失敗、公開 resolved contract/subscription result allowlist | Shioaji simulation 單商品 login/contract/subscription/market-hours event |
+| Phase 1 | 本機完成；live gate | instrument config、BidAsk/Tick normalization、最新五檔 enrichment、callback-before-subscribe、逐 stream 部分失敗、Shioaji 1.5 uppercase 與新版 lowercase contract facade 相容、公開 resolved contract/subscription result allowlist | 修正版 Shioaji simulation 單商品 contract/subscription/market-hours event |
 | Phase 2 | 本機完成；交易時段 gate | bounded queue/batch metrics、bytes/inode capacity gauges、ClickHouse fixture insert、session/gap latest views、idempotent migrator、graceful stop、93.82% Linux tmpfs capacity stop、bind-mount persistence | 完整交易時段 counters/rows 與目標 20TB filesystem 實測 |
 | Phase 3 | 本機完成；長時間 gate | 多商品 loader、connection gap/reconnect counter、exponential login backoff、durable market/audit spool、同 process 自動 replay、short Docker outage 與 privacy purge 實測 | 目標 Linux 網路斷線、container restart、長時間 outage/replay 與多商品測試 |
 | Phase 4 | 工具完成；pilot 待執行 | `pilot-report` 實際查詢 ClickHouse、rows/EPS/latency/parts/session/gap、20TB 80%/90% bytes 與 report template | 3–5 商品至少一完整交易日、建議五日，據實決定 retention/backup |
@@ -430,7 +430,7 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 
 ### 本機驗證摘要
 
-- Host unit tests：47 tests passed；不使用 Shioaji credential。
+- Host unit tests：52 tests passed；不使用 Shioaji credential，包含 Shioaji 1.5 legacy contract lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗診斷。
 - Hardened fixture container：UID/GID `10001:10001`、read-only rootfs、`cap_drop: ALL`、`no-new-privileges`、tmpfs `/tmp`。
 - Linux storage proof：獨立 tmpfs 上 `host-prepare`/`storage-check` 通過；root/marker 為 root-owned read-only metadata，UID 10001 只能寫三個 nested mounts，普通目錄 live validation 被拒絕；16MB tmpfs 93.82% 時觸發 `disk_capacity` stop。
 - Compose：ClickHouse、idempotent migrator 與 collector 啟動成功；ClickHouse ports 未發布；collector 使用 no logging driver、唯讀 rootfs 與 repo 外 bind root。
@@ -442,4 +442,4 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 
 ### Goal 完成邊界
 
-Source、fixture、Docker/Compose 與本機可重現驗證已完成。整體 goal 仍需目標 Linux 主機、repo 外真實 credential、Shioaji 行情權限與交易時段才能完成 live gate；在這些條件提供前，不把 Phase 1–4 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。
+Source、fixture、Docker/Compose 與本機可重現驗證已完成。目標 Linux 曾確認 Shioaji 1.5.3 simulation login 可進入 contract stage，並發現該 runtime 不支援原先只使用新版 lowercase contract facade 的做法；本機已加入 1.5 legacy facade fallback，但仍須在目標 Linux 重建 image 後重新驗證 contract、subscription 與行情寫入。整體 goal 仍需 Shioaji 行情權限與交易時段才能完成 live gate；在這些條件提供前，不把 Phase 1–4 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。

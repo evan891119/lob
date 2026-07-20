@@ -95,7 +95,7 @@ def run_live() -> None:
     credentials = load_credentials(env("LOB_CREDENTIAL_FILE", "/run/secrets/shioaji_credentials"))
     sink = ClickHouseSink(env("LOB_CLICKHOUSE_HOST", "clickhouse"))
     collector = build_collector(sink, storage_root, symbols=[instrument.code for instrument in instruments])
-    from lob_recorder.sources.shioaji_source import ShioajiSource
+    from lob_recorder.sources.shioaji_source import NoActiveSubscriptionError, ShioajiSource
     stopped = threading.Event()
     install_signal_handlers(stopped.set)
     collector.start(status="starting")
@@ -122,6 +122,8 @@ def run_live() -> None:
                 active = sum(result.active for result in results)
                 failed = len(results) - active
                 collector.set_subscriptions(active, failed, [result.descriptor() for result in results])
+                if active == 0:
+                    raise NoActiveSubscriptionError("no market-data subscription became active")
                 collector.logger.write("subscriptions_ready", status="active", count=active)
                 break
             except Exception as exc:

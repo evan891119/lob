@@ -4,9 +4,10 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 47 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 52 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
+- Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
 - Hardened fixture container：UID/GID 10001、read-only rootfs、capabilities ALL dropped、tmpfs `/tmp`。
 - Linux tmpfs mount：`host-prepare`/`storage-check` 的 UID/GID/mode/marker 通過；UID 10001 可讀 root、只能寫指定子目錄，普通未掛載目錄被 live mode 拒絕。
 - 16MB Linux tmpfs 實測 93.82% 使用率會觸發 `disk_capacity` stop；health/session 分開記錄 bytes 與 inode percent。
@@ -22,7 +23,7 @@
 ## 必須在目標 Linux/外部環境完成
 
 - 目標 20TB filesystem 的真實 mount/UUID、實際 owner/mode 與重新開機後掛載驗證。
-- 真實 Shioaji simulation login、單商品及多商品交易時段訂閱。
+- 目標 Linux 已確認 Shioaji 1.5.3 simulation login 能進入 contract stage；仍須用修正版 image 重驗單商品 contract/subscription/market-hours event，再驗多商品交易時段訂閱。
 - 目標 Linux 上的長時間 database outage、container restart、網路斷線與多商品 replay 測試。
 - 至少一完整交易日、建議五日的 3–5 商品 pilot。
 - 依實際 filesystem 可用 bytes 產生 20TB retention/backup 報告。

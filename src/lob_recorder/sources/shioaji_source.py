@@ -8,6 +8,18 @@ from typing import Callable
 from lob_recorder.config import Instrument
 
 
+class ShioajiLoginError(RuntimeError):
+    """Safe login-stage failure without propagating an upstream message."""
+
+
+class ContractLookupError(RuntimeError):
+    """Safe contract-stage failure without propagating an upstream message."""
+
+
+class NoActiveSubscriptionError(RuntimeError):
+    """Raised after public subscription results have been recorded."""
+
+
 @dataclass(slots=True)
 class SubscriptionResult:
     code: str
@@ -54,7 +66,10 @@ class ShioajiSource:
         import shioaji as sj
 
         self.api = sj.Shioaji(simulation=True)
-        self.api.login(api_key=self.credentials[0], secret_key=self.credentials[1])
+        try:
+            self.api.login(api_key=self.credentials[0], secret_key=self.credentials[1])
+        except Exception as exc:
+            raise ShioajiLoginError("Shioaji simulation login failed") from exc
         self.api.set_on_bidask_stk_v1_callback(self._stock_bidask)
         self.api.set_on_tick_stk_v1_callback(self._stock_tick)
         self.api.set_on_bidask_fop_v1_callback(self._fop_bidask)
@@ -95,8 +110,6 @@ class ShioajiSource:
                         instrument.code, stream, False, type(exc).__name__,
                         exchange=instrument.exchange, security_type=instrument.security_type,
                     ))
-        if not any(result.active for result in results):
-            raise RuntimeError("no market-data subscription became active")
         return results
 
     def close(self) -> None:
@@ -117,9 +130,11 @@ class ShioajiSource:
                 pass
 
     def _resolve(self, item: Instrument):
-        contract = self.api.contracts.get(item.code)
+        contract = self._contract_v2(item.code)
         if contract is None:
-            raise ValueError("contract was not resolved")
+            contract = self._contract_v1(item)
+        if contract is None:
+            raise ContractLookupError("configured contract was not resolved")
         resolved_code = str(getattr(contract, "code", ""))
         if resolved_code and resolved_code != item.code:
             raise ValueError("resolved contract code does not match")
@@ -130,6 +145,55 @@ class ShioajiSource:
         if resolved_exchange and resolved_exchange != item.exchange:
             raise ValueError("resolved exchange does not match")
         return contract
+
+    def _contract_v2(self, code: str):
+        """Use the Shioaji 1.7 Contract V2 facade when the runtime provides it."""
+        try:
+            contracts = getattr(self.api, "contracts", None)
+            getter = getattr(contracts, "get", None)
+            return getter(code) if callable(getter) else None
+        except Exception:
+            # Some Shioaji 1.5 Linux builds expose the attribute in stubs but not
+            # at runtime. The uppercase facade below is their supported surface.
+            return None
+
+    def _contract_v1(self, item: Instrument):
+        """Resolve through the Shioaji 1.5 uppercase contract facade."""
+        category_names = {
+            "STK": ("Stocks", "stocks"),
+            "FUT": ("Futures", "futures"),
+            "OPT": ("Options", "options"),
+        }
+        try:
+            contracts = getattr(self.api, "Contracts", None)
+            if contracts is None:
+                return None
+            category = None
+            for name in category_names[item.security_type]:
+                category = getattr(contracts, name, None)
+                if category is not None:
+                    break
+            contract = self._container_get(category, item.code)
+            if contract is not None:
+                return contract
+            exchange_group = self._container_get(category, item.exchange)
+            if exchange_group is None:
+                exchange_group = getattr(category, item.exchange, None)
+            return self._container_get(exchange_group, item.code)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _container_get(container, key: str):
+        if container is None:
+            return None
+        getter = getattr(container, "get", None)
+        if callable(getter):
+            return getter(key)
+        try:
+            return container[key]
+        except (KeyError, TypeError):
+            return None
 
     @staticmethod
     def _enum_value(value) -> str:

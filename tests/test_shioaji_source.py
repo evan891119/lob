@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from lob_recorder.config import Instrument
-from lob_recorder.sources.shioaji_source import ShioajiSource
+from lob_recorder.sources.shioaji_source import ContractLookupError, ShioajiLoginError, ShioajiSource
 
 
 class ShioajiSourceTests(unittest.TestCase):
@@ -76,3 +76,68 @@ class ShioajiSourceTests(unittest.TestCase):
         source.api = SimpleNamespace(contracts=SimpleNamespace(get=lambda _code: bad))
         with self.assertRaises(ValueError):
             source._resolve(source.instruments[0])
+
+    def test_shioaji_15_uppercase_contract_facade_is_supported(self):
+        contract = SimpleNamespace(code="2330", security_type="STK", exchange="TSE")
+        stocks = SimpleNamespace(get=lambda code: contract if code == "2330" else None)
+        source = ShioajiSource(("fake", "fake"), [Instrument("2330", "STK", "TSE", ("tick",))], lambda _event: None)
+        source.api = SimpleNamespace(Contracts=SimpleNamespace(Stocks=stocks))
+
+        self.assertIs(source._resolve(source.instruments[0]), contract)
+
+    def test_legacy_contract_lookup_can_use_exchange_group(self):
+        contract = SimpleNamespace(code="2330", security_type="STK", exchange="TSE")
+        tse = SimpleNamespace(get=lambda code: contract if code == "2330" else None)
+        stocks = SimpleNamespace(get=lambda key: tse if key == "TSE" else None)
+        source = ShioajiSource(("fake", "fake"), [Instrument("2330", "STK", "TSE", ("tick",))], lambda _event: None)
+        source.api = SimpleNamespace(Contracts=SimpleNamespace(Stocks=stocks))
+
+        self.assertIs(source._resolve(source.instruments[0]), contract)
+
+    def test_missing_contract_facades_uses_safe_error_category(self):
+        source = ShioajiSource(("fake", "fake"), [Instrument("2330", "STK", "TSE", ("tick",))], lambda _event: None)
+        source.api = SimpleNamespace()
+
+        with self.assertRaises(ContractLookupError) as caught:
+            source._resolve(source.instruments[0])
+        self.assertNotIn("fake", str(caught.exception))
+
+    def test_login_failure_uses_safe_error_category(self):
+        class FakeApi:
+            def __init__(self, simulation):
+                self.simulation = simulation
+
+            def login(self, **_kwargs):
+                raise RuntimeError("private upstream login response")
+
+        fake_module = SimpleNamespace(Shioaji=FakeApi)
+        source = ShioajiSource(("fake-key", "fake-secret"), [Instrument("2330", "STK", "TSE", ("tick",))], lambda _event: None)
+        runtime = {"SJ_HOME_PATH": "/tmp/a", "SJ_CONTRACTS_PATH": "/tmp/b", "SJ_LOG_PATH": "/tmp/c"}
+        with patch.dict("os.environ", runtime, clear=False), patch.dict(sys.modules, {"shioaji": fake_module}):
+            with self.assertRaises(ShioajiLoginError) as caught:
+                source.connect()
+        self.assertNotIn("private upstream", str(caught.exception))
+
+    def test_all_failed_subscriptions_are_returned_for_safe_diagnostics(self):
+        contract = SimpleNamespace(code="2330", security_type="STK", exchange="TSE", target_code=None)
+
+        class FakeApi:
+            def __init__(self, simulation):
+                self.contracts = SimpleNamespace(get=lambda _code: contract)
+
+            def login(self, **_kwargs): return None
+            def set_on_bidask_stk_v1_callback(self, _cb): return None
+            def set_on_tick_stk_v1_callback(self, _cb): return None
+            def set_on_bidask_fop_v1_callback(self, _cb): return None
+            def set_on_tick_fop_v1_callback(self, _cb): return None
+            def set_session_down_callback(self, _cb): return None
+            def set_event_callback(self, _cb): return None
+            def subscribe(self, *_args, **_kwargs): raise RuntimeError("private upstream message")
+
+        fake_module = SimpleNamespace(Shioaji=FakeApi, QuoteType=SimpleNamespace(BidAsk="bidask", Tick="tick"))
+        source = ShioajiSource(("fake", "fake"), [Instrument("2330", "STK", "TSE", ("bidask", "tick"))], lambda _event: None)
+        runtime = {"SJ_HOME_PATH": "/tmp/a", "SJ_CONTRACTS_PATH": "/tmp/b", "SJ_LOG_PATH": "/tmp/c"}
+        with patch.dict("os.environ", runtime, clear=False), patch.dict(sys.modules, {"shioaji": fake_module}):
+            results = source.connect()
+        self.assertEqual([result.active for result in results], [False, False])
+        self.assertEqual([result.category for result in results], ["RuntimeError", "RuntimeError"])

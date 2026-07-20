@@ -77,6 +77,8 @@ docker compose --env-file /etc/shioaji-lob-recorder/host.env ps
 
 Collector 固定使用 Shioaji simulation login，沒有 production order code。Live 驗證需要真實行情權限與交易時段；不得把 login 回傳的 accounts 印出。
 
+Pinned Shioaji 1.5.3 在部分 Linux runtime 使用 uppercase `api.Contracts`，collector 已同時支援這個 legacy facade 與新版 lowercase facade。更新程式碼後必須使用 `up -d --build` 重建 collector image；只有 restart 舊 container 不會套用修正。安全的 collector log 會用 `ShioajiLoginError`、`ContractLookupError`、`NoActiveSubscriptionError` 或逐 stream 的例外類別標示階段，不保存 Shioaji 原始例外訊息。不要為了除錯直接輸出 login 回傳值或 Shioaji native log。
+
 ## 4. 查詢、匯出與品質
 
 ```bash
