@@ -34,6 +34,15 @@ sudo scripts/storage-identity-check /mnt/lob-data
 
 `storage-identity-check` 是唯讀驗收：確認 exact mount target、ext4/XFS、filesystem UUID 與 `/etc/fstab` 的 `UUID=` entry。直接 mount 時要求 UUID entry 指向資料根目錄；共用 filesystem 的 bind layout 則另外核對底層 UUID mount、專案子目錄來源及 exact `x-systemd.requires-mounts-for=` dependency。輸出只包含 layout、filesystem 類型、總 bytes、service 可用 bytes 與布林結果；不輸出 device path、UUID 值、hostname、底層 mount point 或個人路徑。`fstab_uuid_match=true` 只證明設定存在，仍需在安排好的重新開機後重跑本指令與 `acceptance-check`，才能證明自動掛載及資料服務恢復。
 
+Compose 啟動後可做不需 reboot 的唯讀 boot readiness 檢查：
+
+```bash
+sudo scripts/docker-boot-readiness-check \
+  /etc/shioaji-lob-recorder/host.env
+```
+
+工具會 fail closed 確認 Ubuntu `docker.service` 已設為開機啟動且目前 active、Compose config 有效、ClickHouse 與 collector 正在運行，而且實際 containers 的 restart policy 都是 `unless-stopped`。成功只輸出布林結果，不輸出 host config path、container ID、hostname 或個人路徑；工具不會 enable/restart Docker，也不會建立、停止或重建 container。這是靜態 readiness 證據，不等同真正 reboot 後的自動掛載與服務恢復證據。曾執行 `docker compose down` 會刪除 containers；曾明確 stop 的 container 也不應以本工具冒充可自動恢復。
+
 `host-prepare` 會建立 `.lob-storage-root` marker、ClickHouse 目錄及 UID `10001` 擁有的 `parquet/`、`spool/`、`backup/`、`private-runtime/`。資料根目錄本身由 root 擁有；collector 只讀掛載根目錄，再將 `parquet/`、`spool/`、`private-runtime/` 疊加為可寫 bind mounts，`backup/` 保留給 host 維護流程，不掛成 collector 可寫路徑。因此 collector 不能改名或刪除 ClickHouse/backup 目錄。ClickHouse 目錄依 pinned image UID/GID `101:101` 設定；升級 image 前需重新確認 UID/GID。
 
 ## 2. Repo 外設定與 credential
@@ -143,7 +152,7 @@ sudo cat /mnt/lob-data/parquet/network-outage-report.json
 
 ### Host reboot persistence check
 
-這是刻意分成兩階段的外部驗收；script 不會自行執行 reboot。`prepare` 先重跑 storage identity 與 acceptance checks，將安全的 before report 寫到 Parquet，並把原始 Linux boot identifier 以 `10001:10001`、mode `0600` 暫存在 `private-runtime/reboot-check/`。原始值不會輸出或進入 report，且可由 `privacy-purge --runtime` 清除；重複 prepare 會拒絕覆寫既有 baseline。
+這是刻意分成兩階段的外部驗收；script 不會自行執行 reboot。`prepare` 先重跑 storage identity、acceptance 與 Docker boot readiness checks，將安全的 before report 寫到 Parquet，並把原始 Linux boot identifier 以 `10001:10001`、mode `0600` 暫存在 `private-runtime/reboot-check/`。原始值不會輸出或進入 report，且可由 `privacy-purge --runtime` 清除；重複 prepare 會拒絕覆寫既有 baseline。
 
 ```bash
 sudo scripts/host-reboot-check prepare \

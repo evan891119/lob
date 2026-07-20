@@ -22,6 +22,7 @@ sudo scripts/host-prepare /mnt/lob-data
 sudo scripts/storage-check /mnt/lob-data
 docker compose --env-file /etc/shioaji-lob-recorder/host.env config --quiet
 docker compose --env-file /etc/shioaji-lob-recorder/host.env up -d --build
+sudo scripts/docker-boot-readiness-check /etc/shioaji-lob-recorder/host.env
 sudo scripts/acceptance-check /mnt/lob-data /etc/shioaji-lob-recorder/host.env
 ```
 

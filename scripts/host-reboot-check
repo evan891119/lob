@@ -30,6 +30,7 @@ dc() {
 
 scripts/storage-identity-check "$data_root" >/dev/null
 scripts/acceptance-check "$data_root" "$host_env" >/dev/null
+scripts/docker-boot-readiness-check "$host_env" >/dev/null
 
 state_dir="$data_root/private-runtime/reboot-check"
 state_file="$state_dir/boot-id"

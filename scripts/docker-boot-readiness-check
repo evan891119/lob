@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 1 \
+  || { echo "usage: sudo scripts/docker-boot-readiness-check HOST_ENV_FILE" >&2; exit 2; }
+
+host_env="$1"
+case "$host_env" in
+  /*) ;;
+  *) echo "host config must use an absolute path" >&2; exit 1 ;;
+esac
+test -f "$host_env" && test ! -L "$host_env" \
+  || { echo "host config metadata check failed" >&2; exit 1; }
+
+configured_mode="$(sed -n 's/^LOB_MODE=//p' "$host_env")"
+test "$configured_mode" = "live" \
+  || { echo "boot readiness check requires LOB_MODE=live" >&2; exit 1; }
+
+systemctl is-enabled --quiet docker.service 2>/dev/null \
+  || { echo "docker service is not enabled at boot" >&2; exit 1; }
+systemctl is-active --quiet docker.service 2>/dev/null \
+  || { echo "docker service is not active" >&2; exit 1; }
+
+dc() {
+  docker compose --env-file "$host_env" "$@"
+}
+
+dc config --quiet >/dev/null 2>&1 \
+  || { echo "compose config validation failed" >&2; exit 1; }
+
+for service in clickhouse collector; do
+  container_id="$(dc ps -q "$service" 2>/dev/null || true)"
+  test -n "$container_id" \
+    && test "$(printf '%s\n' "$container_id" | wc -l | tr -d ' ')" -eq 1 \
+    || { echo "required compose service is not running" >&2; exit 1; }
+
+  running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+  test "$running" = "true" \
+    || { echo "required compose service is not running" >&2; exit 1; }
+
+  restart_policy="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id" 2>/dev/null || true)"
+  test "$restart_policy" = "unless-stopped" \
+    || { echo "compose restart policy does not match" >&2; exit 1; }
+done
+
+printf '%s\n' '{"docker_service_enabled":true,"docker_service_active":true,"compose_config_valid":true,"required_services_running":true,"restart_policies_match":true}'
