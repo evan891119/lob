@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 4 \
+  || { echo "usage: sudo scripts/database-outage-drill ABSOLUTE_DATA_ROOT HOST_ENV_FILE SECONDS --confirm-database-outage" >&2; exit 2; }
+
+data_root="$1"
+host_env="$2"
+duration="$3"
+confirmation="$4"
+test "$confirmation" = "--confirm-database-outage" \
+  || { echo "explicit database outage confirmation is required" >&2; exit 1; }
+case "$duration" in
+  ''|*[!0-9]*) echo "outage duration must be an integer" >&2; exit 1 ;;
+esac
+test "$duration" -ge 30 && test "$duration" -le 900 \
+  || { echo "outage duration must be between 30 and 900 seconds" >&2; exit 1; }
+test "${data_root#/}" != "$data_root" && test "$data_root" != "/" \
+  || { echo "unsafe data root" >&2; exit 1; }
+test -f "$host_env" || { echo "host config is unavailable" >&2; exit 1; }
+configured_root="$(sed -n 's/^LOB_DATA_ROOT=//p' "$host_env")"
+test "$configured_root" = "$data_root" \
+  || { echo "data root does not match host config" >&2; exit 1; }
+test "$(sed -n 's/^LOB_MODE=//p' "$host_env")" = "live" \
+  || { echo "outage drill requires LOB_MODE=live" >&2; exit 1; }
+
+dc() {
+  docker compose --env-file "$host_env" "$@"
+}
+
+service_running() {
+  dc ps --status running --services | awk -v service="$1" '$0 == service { found = 1 } END { exit(found ? 0 : 1) }'
+}
+
+scripts/storage-check "$data_root"
+docker compose --env-file "$host_env" config --quiet
+service_running collector || { echo "collector must be running" >&2; exit 1; }
+service_running clickhouse || { echo "clickhouse must be running" >&2; exit 1; }
+
+before="/var/lib/lob/parquet/outage-before.json"
+after="/var/lib/lob/parquet/outage-after.json"
+evidence="/var/lib/lob/parquet/outage-report.json"
+dc exec -T collector lob-recorder acceptance-report \
+  --host clickhouse --health-file /var/lib/lob/private-runtime/collector/health.json \
+  --output "$before"
+
+recover_clickhouse() {
+  dc up -d clickhouse >/dev/null 2>&1 || true
+}
+trap recover_clickhouse EXIT HUP INT TERM
+
+echo "starting confirmed ClickHouse outage drill"
+dc stop clickhouse >/dev/null
+sleep "$duration"
+dc up -d clickhouse >/dev/null
+
+attempt=0
+until dc exec -T clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  test "$attempt" -lt 36 || { echo "clickhouse did not recover within 180 seconds" >&2; exit 1; }
+  sleep 5
+done
+
+attempt=0
+while :; do
+  if dc exec -T collector lob-recorder acceptance-report \
+      --host clickhouse --health-file /var/lib/lob/private-runtime/collector/health.json \
+      --output "$after" >/dev/null 2>&1; then
+    if dc exec -T collector lob-recorder outage-verify \
+        --before "$before" --after "$after" --outage-seconds "$duration" \
+        --output "$evidence" >/dev/null 2>&1; then
+      break
+    fi
+  fi
+  attempt=$((attempt + 1))
+  test "$attempt" -lt 36 || { echo "spool replay was not verified within 180 seconds" >&2; exit 1; }
+  sleep 5
+done
+
+trap - EXIT HUP INT TERM
+echo "outage drill complete; privacy-safe report written to the data-root parquet area"

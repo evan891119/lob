@@ -15,6 +15,7 @@ from lob_recorder.collector import Collector, install_signal_handlers
 from lob_recorder.config import load_instruments
 from lob_recorder.credentials import load_credentials
 from lob_recorder.exporter import export_clickhouse, export_day
+from lob_recorder.outage import build_outage_evidence, write_outage_evidence
 from lob_recorder.pilot import collect_report
 from lob_recorder.privacy import correlation_id
 from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
@@ -255,6 +256,17 @@ def command_acceptance_report(args) -> None:
         raise SystemExit(f"acceptance report failed: {type(exc).__name__}") from None
 
 
+def command_outage_verify(args) -> None:
+    try:
+        report = build_outage_evidence(args.before, args.after, args.outage_seconds)
+        write_outage_evidence(report, args.output)
+    except Exception as exc:
+        raise SystemExit(f"outage verification failed: {type(exc).__name__}") from None
+    if not report["checks"]["outage_recovery_verified"]:
+        raise SystemExit("outage verification incomplete")
+    print("outage verification complete")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="lob-recorder")
     sub = result.add_subparsers(dest="command", required=True)
@@ -273,6 +285,7 @@ def parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
+    outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)
     return result
 
 

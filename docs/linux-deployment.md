@@ -98,6 +98,19 @@ sudo cat /mnt/lob-data/parquet/acceptance-report.json
 
 這份摘要只能保存執行當下的證據，不能單獨證明重新開機後 mount 持續存在、完整交易時段、刻意斷線/outage recovery 或多日 pilot；這些 gate 必須在相應操作之後重新執行並由部署者確認。
 
+### 受控 ClickHouse outage drill
+
+只在 simulation collector 正於交易時段持續收到行情、並已接受 ClickHouse 暫停寫入的情況執行。以下單一指令會先驗證 storage/Compose/服務狀態及產生 before report，明確停止 ClickHouse 300 秒，再啟動並等待 spool replay；任何 exit、terminal interrupt 或驗證失敗都會透過 trap 再次嘗試啟動 ClickHouse。允許範圍為 30–900 秒，缺少確認 flag 會在變更服務前拒絕執行。
+
+```bash
+sudo scripts/database-outage-drill \
+  /mnt/lob-data /etc/shioaji-lob-recorder/host.env 300 \
+  --confirm-database-outage
+sudo cat /mnt/lob-data/parquet/outage-report.json
+```
+
+成功報告只包含 requested seconds、counter deltas 與布林 checks，不包含 session ID、credential、帳戶、hostname 或 host path。`outage_recovery_verified=true` 要求 collector 未重啟、前後皆為 simulation、outage 期間確實收到行情並新增 spool、replayed delta 至少等於 spooled delta、沒有新增 drop，且新的 `database_failure` gap 已關閉。若非交易時段沒有新事件，驗收會安全失敗而不是冒充成功；ClickHouse 仍會被拉回。此 drill 不模擬 Shioaji 網路斷線，也不等同 host reboot。
+
 ## 4. 查詢、匯出與品質
 
 ```bash
