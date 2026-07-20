@@ -5,7 +5,12 @@ from datetime import datetime
 from typing import Iterable
 
 
-def inspect(records: Iterable[dict], max_gap_seconds: float = 60.0) -> dict[str, int]:
+def inspect(
+    records: Iterable[dict],
+    max_gap_seconds: float = 60.0,
+    *,
+    sequence_scope_complete: bool = False,
+) -> dict[str, int | bool | None]:
     rows = list(records)
     issues = Counter()
     seen: set[tuple] = set()
@@ -16,7 +21,9 @@ def inspect(records: Iterable[dict], max_gap_seconds: float = 60.0) -> dict[str,
         session = str(row.get("session_id", ""))
         sequence = int(row.get("sequence_no", 0))
         stream = str(row.get("stream", ""))
-        key = (session, sequence, stream)
+        # sequence_no is allocated across every market stream in a collector
+        # session, so the stream must not be part of duplicate identity.
+        key = (session, sequence)
         if key in seen:
             issues["duplicates"] += 1
         seen.add(key)
@@ -35,11 +42,12 @@ def inspect(records: Iterable[dict], max_gap_seconds: float = 60.0) -> dict[str,
             ):
                 issues["crossed_book"] += 1
 
-    for session_rows in sessions.values():
-        sequences = sorted({int(row.get("sequence_no", 0)) for row in session_rows})
-        for previous, current in zip(sequences, sequences[1:]):
-            if current > previous + 1:
-                issues["sequence_gaps"] += current - previous - 1
+    if sequence_scope_complete:
+        for session_rows in sessions.values():
+            sequences = sorted({int(row.get("sequence_no", 0)) for row in session_rows})
+            for previous, current in zip(sequences, sequences[1:]):
+                if current > previous + 1:
+                    issues["sequence_gaps"] += current - previous - 1
 
     for stream_rows in streams.values():
         ordered = sorted(stream_rows, key=lambda row: int(row.get("sequence_no", 0)))
@@ -67,10 +75,21 @@ def inspect(records: Iterable[dict], max_gap_seconds: float = 60.0) -> dict[str,
         "negative_volume",
         "crossed_book",
     )
-    return {name: issues.get(name, 0) for name in names}
+    result: dict[str, int | bool | None] = {
+        name: issues.get(name, 0) for name in names
+    }
+    result["sequence_scope_complete"] = sequence_scope_complete
+    if not sequence_scope_complete:
+        result["sequence_gaps"] = None
+    return result
 
 
-def inspect_parquet(pattern: str, max_gap_seconds: float = 60.0) -> dict[str, int]:
+def inspect_parquet(
+    pattern: str,
+    max_gap_seconds: float = 60.0,
+    *,
+    sequence_scope_complete: bool = False,
+) -> dict[str, int | bool | None]:
     import glob
 
     files = glob.glob(pattern, recursive=True)
@@ -84,4 +103,8 @@ def inspect_parquet(pattern: str, max_gap_seconds: float = 60.0) -> dict[str, in
         for row in table.to_pylist():
             row.setdefault("stream", stream)
             rows.append(row)
-    return inspect(rows, max_gap_seconds=max_gap_seconds)
+    return inspect(
+        rows,
+        max_gap_seconds=max_gap_seconds,
+        sequence_scope_complete=sequence_scope_complete,
+    )

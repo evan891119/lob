@@ -261,7 +261,19 @@ def command_privacy_purge(args) -> None:
 
 
 def command_quality(args) -> None:
-    result = inspect(read_jsonl(args.input), args.max_gap_seconds) if args.input else inspect_parquet(args.parquet, args.max_gap_seconds)
+    result = (
+        inspect(
+            read_jsonl(args.input),
+            args.max_gap_seconds,
+            sequence_scope_complete=args.complete_sequence_scope,
+        )
+        if args.input
+        else inspect_parquet(
+            args.parquet,
+            args.max_gap_seconds,
+            sequence_scope_complete=args.complete_sequence_scope,
+        )
+    )
     print(json.dumps(result, sort_keys=True))
 
 
@@ -350,7 +362,7 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("--database-metadata", action="store_true", help="handled by scripts/privacy-purge using ClickHouse exec")
     purge.add_argument("--runtime-root", required=True); purge.add_argument("--spool-root", required=True); purge.add_argument("--credential-file", required=True)
     purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
-    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.set_defaults(func=command_quality)
+    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.add_argument("--complete-sequence-scope", action="store_true", help="assert that input contains every market event for each included session interval"); quality.set_defaults(func=command_quality)
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.add_argument("--start-date", type=date.fromisoformat); pilot.add_argument("--end-date", type=date.fromisoformat); pilot.set_defaults(func=command_pilot_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)

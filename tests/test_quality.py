@@ -31,16 +31,32 @@ class QualityTests(unittest.TestCase):
         result = inspect([
             {"stream": "tick", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "1"},
             {"stream": "tick", "session_id": "s", "sequence_no": 3, "symbol": "x", "event_ts": "3"},
-        ])
+        ], sequence_scope_complete=True)
         self.assertEqual(result["sequence_gaps"], 1)
+        self.assertTrue(result["sequence_scope_complete"])
+
+    def test_partial_scope_does_not_invent_sequence_gaps(self):
+        result = inspect([
+            {"stream": "tick", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "1"},
+            {"stream": "tick", "session_id": "s", "sequence_no": 3, "symbol": "x", "event_ts": "3"},
+        ])
+        self.assertIsNone(result["sequence_gaps"])
+        self.assertFalse(result["sequence_scope_complete"])
 
     def test_interleaved_streams_do_not_create_false_sequence_gap(self):
         result = inspect([
             {"stream": "bidask", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "2026-01-02T09:00:00+08:00"},
             {"stream": "tick", "session_id": "s", "sequence_no": 2, "symbol": "x", "event_ts": "2026-01-02T09:00:01+08:00"},
             {"stream": "bidask", "session_id": "s", "sequence_no": 3, "symbol": "x", "event_ts": "2026-01-02T09:00:02+08:00"},
-        ])
+        ], sequence_scope_complete=True)
         self.assertEqual(result["sequence_gaps"], 0)
+
+    def test_same_session_sequence_across_streams_is_duplicate(self):
+        result = inspect([
+            {"stream": "bidask", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "2026-01-02T09:00:00+08:00"},
+            {"stream": "tick", "session_id": "s", "sequence_no": 1, "symbol": "x", "event_ts": "2026-01-02T09:00:01+08:00"},
+        ])
+        self.assertEqual(result["duplicates"], 1)
 
     def test_detects_time_gap_with_explicit_threshold(self):
         result = inspect([

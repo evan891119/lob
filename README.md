@@ -12,7 +12,7 @@ PYTHONPATH=src python3 -m lob_recorder.cli fixture \
   --input fixtures/events.jsonl \
   --output /tmp/lob-fixture.jsonl
 PYTHONPATH=src python3 -m lob_recorder.cli quality \
-  --input /tmp/lob-fixture.jsonl
+  --input /tmp/lob-fixture.jsonl --complete-sequence-scope
 ```
 
 ## Linux 啟動摘要

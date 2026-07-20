@@ -192,11 +192,18 @@ docker compose exec -T collector lob-recorder export \
 docker compose exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/symbol=2330/trading_date=2026-01-02/*.parquet'
 
+# 只有當 pattern 包含該日期所有商品與兩種 stream，才可宣告 sequence scope 完整
+docker compose exec -T collector lob-recorder quality \
+  --parquet '/var/lib/lob/parquet/symbol=*/trading_date=2026-01-02/*.parquet' \
+  --complete-sequence-scope
+
 docker compose exec -T collector lob-recorder pilot-report \
   --host clickhouse \
   --start-date 2026-01-02 --end-date 2026-01-06 \
   --output /var/lib/lob/parquet/pilot-report.json
 ```
+
+`sequence_no` 是 collector session 內跨商品、跨 BidAsk/Tick 共用的流水號。單一商品、單一 stream 或其他部分匯出不能判斷缺號；quality report 會 fail closed 輸出 `sequence_scope_complete=false` 與 `sequence_gaps=null`。只有 pattern 確實包含所選 session interval 的所有行情事件時，才可加 `--complete-sequence-scope`；錯把部分資料宣告完整會製造假 sequence gap。Duplicate identity 使用 `session_id + sequence_no`，相同 sequence 即使落在不同 stream 也會被偵測。
 
 正式 pilot 必須同時指定 inclusive `--start-date` 與 `--end-date`，讓 market、peak、session 與 gap 只包含該次 pilot 範圍，避免把先前 fixture 或試跑資料混入。只給其中一個日期、日期倒置或非正容量 override 都會 fail closed。完全不指定日期仍可產生全資料庫診斷，但不可作為 scoped pilot 最終容量證據。
 
