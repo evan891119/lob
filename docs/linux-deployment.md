@@ -111,6 +111,21 @@ sudo cat /mnt/lob-data/parquet/outage-report.json
 
 成功報告只包含 requested seconds、counter deltas 與布林 checks，不包含 session ID、credential、帳戶、hostname 或 host path。`outage_recovery_verified=true` 要求 collector 未重啟、前後皆為 simulation、outage 期間確實收到行情並新增 spool、replayed delta 至少等於 spooled delta、沒有新增 drop，且新的 `database_failure` gap 已關閉。若非交易時段沒有新事件，驗收會安全失敗而不是冒充成功；ClickHouse 仍會被拉回。此 drill 不模擬 Shioaji 網路斷線，也不等同 host reboot。
 
+### 受控 Shioaji outbound network drill
+
+新版 collector 在 Shioaji event code `13`（reconnected）後，只由 callback 設定 signal，再由 collector main thread 重新訂閱全部已解析的公開行情 streams；不在 callback thread 執行可能阻塞的 `subscribe()`。只有至少一個 stream 恢復後才記錄 reconnect 並關閉 `connection_down` gap；全部失敗時以 5–60 秒 exponential backoff 重試，不輸出上游原始訊息。
+
+以下指令只中斷 collector 的 Compose `outbound` network 60 秒；ClickHouse 所在的 `lob_internal` network 保持連線。它不停止或重建 collector，因此可驗證相同行程內的 reconnect/resubscribe。缺少確認 flag 或秒數不在 30–300 範圍時會在 network mutation 前拒絕；exit/interrupt trap 會嘗試把 outbound network 接回。
+
+```bash
+sudo scripts/network-outage-drill \
+  /mnt/lob-data /etc/shioaji-lob-recorder/host.env 60 \
+  --confirm-network-outage
+sudo cat /mnt/lob-data/parquet/network-outage-report.json
+```
+
+`network_outage_verified=true` 要求同一 simulation collector session、reconnect counter 增加、subscriptions 數量恢復且未惡化、恢復後重新收到行情、沒有新增 drop，以及新的 `connection_down` gap 已關閉。若 Shioaji 沒有偵測到斷線、非交易時段沒有新行情或訂閱未恢復，report 會保留失敗 checks；工具不會把單純重新接上 Docker network 冒充 Shioaji 恢復成功。
+
 ## 4. 查詢、匯出與品質
 
 ```bash

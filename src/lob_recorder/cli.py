@@ -15,7 +15,11 @@ from lob_recorder.collector import Collector, install_signal_handlers
 from lob_recorder.config import load_instruments
 from lob_recorder.credentials import load_credentials
 from lob_recorder.exporter import export_clickhouse, export_day
-from lob_recorder.outage import build_outage_evidence, write_outage_evidence
+from lob_recorder.outage import (
+    build_network_outage_evidence,
+    build_outage_evidence,
+    write_outage_evidence,
+)
 from lob_recorder.pilot import collect_report
 from lob_recorder.privacy import correlation_id
 from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
@@ -102,28 +106,37 @@ def run_live() -> None:
     install_signal_handlers(stopped.set)
     collector.start(status="starting")
     source = None
+    reconnected = threading.Event()
+
+    def apply_subscription_results(results) -> int:
+        for result in results:
+            collector.logger.write(
+                "subscription_result", symbol=result.code, stream=result.stream,
+                status=result.category, exchange=result.exchange,
+                security_type=result.security_type, resolved_code=result.resolved_code,
+                target_code=result.target_code,
+            )
+        active = sum(result.active for result in results)
+        collector.set_subscriptions(active, len(results) - active, [
+            result.descriptor() for result in results
+        ])
+        return active
+
     try:
         retry_seconds = 60
         while not stopped.is_set():
+            reconnected.clear()
             source = ShioajiSource(
                 credentials,
                 instruments,
                 collector.emit,
                 on_disconnect=lambda *_args: collector.source_event(12),
+                on_reconnect=reconnected.set,
                 on_event=collector.source_event,
             )
             try:
                 results = source.connect()
-                for result in results:
-                    collector.logger.write(
-                        "subscription_result", symbol=result.code, stream=result.stream,
-                        status=result.category, exchange=result.exchange,
-                        security_type=result.security_type, resolved_code=result.resolved_code,
-                        target_code=result.target_code,
-                    )
-                active = sum(result.active for result in results)
-                failed = len(results) - active
-                collector.set_subscriptions(active, failed, [result.descriptor() for result in results])
+                active = apply_subscription_results(results)
                 if active == 0:
                     raise NoActiveSubscriptionError("no market-data subscription became active")
                 collector.logger.write("subscriptions_ready", status="active", count=active)
@@ -137,7 +150,30 @@ def run_live() -> None:
                 if wait_for_stop(stopped, collector, retry_seconds):
                     return
                 retry_seconds = min(retry_seconds * 2, 900)
-        wait_for_stop(stopped, collector)
+        reconnected.clear()
+        reconnect_pending = False
+        reconnect_retry_at = 0.0
+        reconnect_retry_seconds = 5.0
+        while not wait_for_stop(stopped, collector, 0.25):
+            if reconnected.is_set():
+                reconnected.clear()
+                reconnect_pending = True
+                reconnect_retry_at = 0.0
+                reconnect_retry_seconds = 5.0
+            if reconnect_pending and time.monotonic() >= reconnect_retry_at:
+                results = source.resubscribe()
+                active = apply_subscription_results(results)
+                if active:
+                    collector.source_event(13)
+                    restored_status = (
+                        "active" if all(result.active for result in results) else "degraded"
+                    )
+                    collector.logger.write("subscriptions_restored", status=restored_status, count=active)
+                    reconnect_pending = False
+                else:
+                    collector.set_status("retrying_subscriptions")
+                    reconnect_retry_at = time.monotonic() + reconnect_retry_seconds
+                    reconnect_retry_seconds = min(reconnect_retry_seconds * 2, 60.0)
     finally:
         if source is not None:
             source.close()
@@ -267,6 +303,17 @@ def command_outage_verify(args) -> None:
     print("outage verification complete")
 
 
+def command_network_outage_verify(args) -> None:
+    try:
+        report = build_network_outage_evidence(args.before, args.after, args.outage_seconds)
+        write_outage_evidence(report, args.output)
+    except Exception as exc:
+        raise SystemExit(f"network outage verification failed: {type(exc).__name__}") from None
+    if not report["checks"]["network_outage_verified"]:
+        raise SystemExit("network outage verification incomplete")
+    print("network outage verification complete")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="lob-recorder")
     sub = result.add_subparsers(dest="command", required=True)
@@ -286,6 +333,7 @@ def parser() -> argparse.ArgumentParser:
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)
+    network_outage = sub.add_parser("network-outage-verify"); network_outage.add_argument("--before", required=True); network_outage.add_argument("--after", required=True); network_outage.add_argument("--outage-seconds", required=True, type=int); network_outage.add_argument("--output", required=True); network_outage.set_defaults(func=command_network_outage_verify)
     return result
 
 

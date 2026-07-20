@@ -33,6 +33,7 @@ class ShioajiSourceTests(unittest.TestCase):
     def test_callbacks_precede_subscribe_and_partial_failure_is_reported(self):
         actions = []
         system_codes = []
+        reconnects = []
         contract = SimpleNamespace(code="2330", security_type="STK", exchange="TSE", target_code=None)
 
         class FakeApi:
@@ -61,6 +62,7 @@ class ShioajiSourceTests(unittest.TestCase):
             ("fake", "fake"),
             [Instrument("2330", "STK", "TSE", ("bidask", "tick"))],
             lambda _event: None,
+            on_reconnect=lambda: reconnects.append("reconnected"),
             on_event=system_codes.append,
         )
         runtime = {"SJ_HOME_PATH": "/tmp/a", "SJ_CONTRACTS_PATH": "/tmp/b", "SJ_LOG_PATH": "/tmp/c"}
@@ -68,12 +70,19 @@ class ShioajiSourceTests(unittest.TestCase):
             results = source.connect()
             source.api.event_callback(0, 13, "ignored-private-info", "ignored-private-event")
             source.api.event_callback(SimpleNamespace(event_code=12, info="ignored-private-info"))
+            restored = source.resubscribe()
             source.close()
         first_subscribe = next(index for index, action in enumerate(actions) if action.startswith("subscribe:"))
         self.assertGreaterEqual(actions[:first_subscribe].count("callback"), 4)
         self.assertEqual([result.active for result in results], [True, False])
         self.assertEqual(results[1].category, "RuntimeError")
-        self.assertEqual(system_codes, [13, 12])
+        self.assertEqual(system_codes, [12])
+        self.assertEqual(reconnects, ["reconnected"])
+        self.assertEqual(
+            [result.category for result in restored], ["resubscribed", "RuntimeError"]
+        )
+        self.assertEqual(actions.count("subscribe:bidask"), 2)
+        self.assertEqual(actions.count("subscribe:tick"), 2)
         self.assertEqual(results[0].descriptor(), "STK:TSE:2330:bidask:2330:subscribed")
 
     def test_contract_metadata_mismatch_is_rejected(self):

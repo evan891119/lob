@@ -45,12 +45,14 @@ class ShioajiSource:
         instruments: list[Instrument],
         emit: Callable[[dict], None],
         on_disconnect: Callable[[], None] | None = None,
+        on_reconnect: Callable[[], None] | None = None,
         on_event: Callable[[int], None] | None = None,
     ):
         self.credentials = credentials
         self.instruments = instruments
         self.emit = emit
         self.on_disconnect = on_disconnect or (lambda: None)
+        self.on_reconnect = on_reconnect or (lambda: None)
         self.on_event = on_event or (lambda _code: None)
         self.api = None
         self.contracts: list[tuple[Instrument, object]] = []
@@ -111,6 +113,46 @@ class ShioajiSource:
                         instrument.code, stream, False, type(exc).__name__,
                         exchange=instrument.exchange, security_type=instrument.security_type,
                     ))
+        return results
+
+    def resubscribe(self) -> list[SubscriptionResult]:
+        """Restore the previously active public quote streams after event 13."""
+        if self.api is None:
+            raise RuntimeError("Shioaji source is not connected")
+        import shioaji as sj
+
+        results: list[SubscriptionResult] = []
+        restored: list[tuple[Instrument, object, str]] = []
+        for instrument, contract in self.contracts:
+            for stream in instrument.streams:
+                quote_type = sj.QuoteType.BidAsk if stream == "bidask" else sj.QuoteType.Tick
+                try:
+                    self.api.subscribe(
+                        contract,
+                        quote_type=quote_type,
+                        intraday_odd=instrument.intraday_odd,
+                    )
+                    restored.append((instrument, contract, stream))
+                    results.append(SubscriptionResult(
+                        instrument.code,
+                        stream,
+                        True,
+                        "resubscribed",
+                        resolved_code=str(getattr(contract, "code", instrument.code)),
+                        target_code=str(getattr(contract, "target_code", "") or ""),
+                        exchange=instrument.exchange,
+                        security_type=instrument.security_type,
+                    ))
+                except Exception as exc:
+                    results.append(SubscriptionResult(
+                        instrument.code,
+                        stream,
+                        False,
+                        type(exc).__name__,
+                        exchange=instrument.exchange,
+                        security_type=instrument.security_type,
+                    ))
+        self.active_subscriptions = restored
         return results
 
     def close(self) -> None:
@@ -255,7 +297,13 @@ class ShioajiSource:
             event_code = getattr(args[0], "event_code", args[0])
         else:
             return
-        self.on_event(int(event_code))
+        code = int(event_code)
+        if code == 13:
+            # Only signal the main collector thread here. subscribe() may block
+            # and must not run on Shioaji's callback delivery path.
+            self.on_reconnect()
+        else:
+            self.on_event(code)
 
     def _stock_bidask(self, bidask): self._bidask(bidask, "STK")
     def _stock_tick(self, tick): self._tick(tick, "STK")
