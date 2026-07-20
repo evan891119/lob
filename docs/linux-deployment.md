@@ -6,10 +6,25 @@
 
 - Linux x86_64 或 arm64。
 - Docker Engine 與 Docker Compose plugin。
-- 已格式化為 ext4/XFS、由 `/etc/fstab` 以 UUID 掛載的資料磁碟。
+- 已格式化為 ext4/XFS、由 `/etc/fstab` 以 UUID 掛載的資料磁碟；可使用整個 filesystem，或使用共用 filesystem 裡的專案子目錄。
 - 僅需對外連線；不需開 inbound port。
 
 先確認 20TB 磁碟實際掛載到選定位置，再準備目錄。Script 會拒絕普通目錄，以防磁碟未掛載時誤寫系統碟。
+
+若整個 filesystem 專供本專案使用，可以直接以 UUID 掛載：
+
+```fstab
+UUID=<filesystem-uuid> /mnt/lob-data ext4 defaults 0 2
+```
+
+若 20TB filesystem 是共用的，保留它原本的 UUID mount，再將專案子目錄 bind mount 到固定資料根目錄。兩行都必須存在；第二行的明確 systemd dependency 可避免底層共用磁碟未掛載時，bind mount 誤用系統碟上的空目錄：
+
+```fstab
+UUID=<filesystem-uuid> /mnt/shared-data ext4 defaults 0 2
+/mnt/shared-data/lob-data /mnt/lob-data none bind,x-systemd.requires-mounts-for=/mnt/shared-data 0 0
+```
+
+以上是一般化範例，不要把真實 UUID、主機名稱或個人路徑提交到 repo。`/mnt/shared-data` 應替換成該共用 filesystem 已有的固定 mount point；不要為了本專案把整顆共用硬碟改掛到 `/mnt/lob-data`。
 
 ```bash
 sudo scripts/host-prepare /mnt/lob-data
@@ -17,7 +32,7 @@ sudo scripts/storage-check /mnt/lob-data
 sudo scripts/storage-identity-check /mnt/lob-data
 ```
 
-`storage-identity-check` 是唯讀驗收：確認 mount target、ext4/XFS、filesystem UUID 與 `/etc/fstab` 的 `UUID=` entry，並只輸出 filesystem 類型、總 bytes、service 可用 bytes 與布林結果；不輸出 device path、UUID 值、hostname 或個人路徑。`fstab_uuid_match=true` 只證明設定存在，仍需在安排好的重新開機後重跑本指令與 `acceptance-check`，才能證明自動掛載及資料服務恢復。
+`storage-identity-check` 是唯讀驗收：確認 exact mount target、ext4/XFS、filesystem UUID 與 `/etc/fstab` 的 `UUID=` entry。直接 mount 時要求 UUID entry 指向資料根目錄；共用 filesystem 的 bind layout 則另外核對底層 UUID mount、專案子目錄來源及 exact `x-systemd.requires-mounts-for=` dependency。輸出只包含 layout、filesystem 類型、總 bytes、service 可用 bytes 與布林結果；不輸出 device path、UUID 值、hostname、底層 mount point 或個人路徑。`fstab_uuid_match=true` 只證明設定存在，仍需在安排好的重新開機後重跑本指令與 `acceptance-check`，才能證明自動掛載及資料服務恢復。
 
 `host-prepare` 會建立 `.lob-storage-root` marker、ClickHouse 目錄及 UID `10001` 擁有的 `parquet/`、`spool/`、`backup/`、`private-runtime/`。資料根目錄本身由 root 擁有；collector 只讀掛載根目錄，再將 `parquet/`、`spool/`、`private-runtime/` 疊加為可寫 bind mounts，`backup/` 保留給 host 維護流程，不掛成 collector 可寫路徑。因此 collector 不能改名或刪除 ClickHouse/backup 目錄。ClickHouse 目錄依 pinned image UID/GID `101:101` 設定；升級 image 前需重新確認 UID/GID。
 

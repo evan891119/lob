@@ -17,11 +17,6 @@ case "$filesystem_type" in
   *) echo "storage filesystem type is unsupported" >&2; exit 1 ;;
 esac
 
-source_device="$(findmnt -n --target "$root" -o SOURCE)"
-test -n "$source_device" || { echo "storage source is unavailable" >&2; exit 1; }
-uuid="$(blkid -s UUID -o value "$source_device" 2>/dev/null || true)"
-test -n "$uuid" || { echo "storage filesystem UUID is unavailable" >&2; exit 1; }
-
 fstab_file="/etc/fstab"
 if test "${LOB_STORAGE_IDENTITY_TEST_ONLY:-false}" = "true"; then
   test -n "${LOB_STORAGE_IDENTITY_FSTAB:-}" \
@@ -29,10 +24,79 @@ if test "${LOB_STORAGE_IDENTITY_TEST_ONLY:-false}" = "true"; then
   fstab_file="$LOB_STORAGE_IDENTITY_FSTAB"
 fi
 test -f "$fstab_file" || { echo "fstab is unavailable" >&2; exit 1; }
-awk -v expected="UUID=$uuid" -v target="$root" '
-  $1 == expected && $2 == target { found = 1 }
-  END { exit(found ? 0 : 1) }
-' "$fstab_file" || { echo "fstab UUID entry does not match storage mount" >&2; exit 1; }
+
+fsroot="$(findmnt -n --target "$root" -o FSROOT)"
+case "$fsroot" in
+  /*) ;;
+  *) echo "storage filesystem root is unavailable" >&2; exit 1 ;;
+esac
+
+# findmnt resolves the backing UUID even when SOURCE includes a bind subpath.
+# Fall back to blkid only for a direct filesystem mount.
+uuid="$(findmnt -n --target "$root" -o UUID 2>/dev/null || true)"
+if test -z "$uuid" && test "$fsroot" = "/"; then
+  source_device="$(findmnt -n --target "$root" -o SOURCE)"
+  test -n "$source_device" || { echo "storage source is unavailable" >&2; exit 1; }
+  uuid="$(blkid -s UUID -o value "$source_device" 2>/dev/null || true)"
+fi
+test -n "$uuid" || { echo "storage filesystem UUID is unavailable" >&2; exit 1; }
+
+mount_layout="direct"
+bind_source_match="null"
+bind_dependency_match="null"
+
+if test "$fsroot" = "/"; then
+  awk -v expected="UUID=$uuid" -v target="$root" -v fstype="$filesystem_type" '
+    $1 == expected && $2 == target && $3 == fstype { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$fstab_file" || { echo "fstab UUID entry does not match storage mount" >&2; exit 1; }
+else
+  mount_layout="bind"
+  case "$fsroot" in
+    *\\*) echo "storage bind subpath is unsupported" >&2; exit 1 ;;
+  esac
+
+  backing_target="$(awk -v expected="UUID=$uuid" -v fstype="$filesystem_type" '
+    $1 == expected && $3 == fstype { print $2; exit }
+  ' "$fstab_file")"
+  case "$backing_target" in
+    ""|/|"$root"|*\\*|[!/]*)
+      echo "fstab backing filesystem entry does not match storage mount" >&2
+      exit 1
+      ;;
+  esac
+
+  mountpoint -q "$backing_target" \
+    || { echo "backing filesystem is not a mount point" >&2; exit 1; }
+  backing_exact_target="$(findmnt -n --mountpoint "$backing_target" -o TARGET)"
+  test "$backing_exact_target" = "$backing_target" \
+    || { echo "backing filesystem mount target does not match" >&2; exit 1; }
+  backing_filesystem_type="$(findmnt -n --mountpoint "$backing_target" -o FSTYPE)"
+  test "$backing_filesystem_type" = "$filesystem_type" \
+    || { echo "backing filesystem type does not match" >&2; exit 1; }
+  backing_uuid="$(findmnt -n --mountpoint "$backing_target" -o UUID 2>/dev/null || true)"
+  test -n "$backing_uuid" && test "$backing_uuid" = "$uuid" \
+    || { echo "backing filesystem UUID does not match" >&2; exit 1; }
+
+  expected_bind_source="${backing_target%/}${fsroot}"
+  awk -v source="$expected_bind_source" -v target="$root" \
+      -v requirement="x-systemd.requires-mounts-for=$backing_target" '
+    function has_option(options, expected, count, values, i) {
+      count = split(options, values, ",")
+      for (i = 1; i <= count; i++) {
+        if (values[i] == expected) return 1
+      }
+      return 0
+    }
+    $1 == source && $2 == target && $3 == "none" &&
+      has_option($4, "bind") && has_option($4, requirement) { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$fstab_file" \
+    || { echo "fstab bind mount entry or dependency does not match" >&2; exit 1; }
+
+  bind_source_match="true"
+  bind_dependency_match="true"
+fi
 
 set -- $(df -B1 --output=size,used,avail "$root" | awk 'NR == 2 { print $1, $2, $3 }')
 test "$#" -eq 3 || { echo "storage capacity is unavailable" >&2; exit 1; }
@@ -44,5 +108,6 @@ case "$total_bytes:$used_bytes:$available_bytes" in
 esac
 service_usable_bytes=$((used_bytes + available_bytes))
 
-printf '{"mountpoint":true,"filesystem_type":"%s","total_bytes":%s,"service_usable_bytes":%s,"uuid_present":true,"fstab_uuid_match":true}\n' \
-  "$filesystem_type" "$total_bytes" "$service_usable_bytes"
+printf '{"mountpoint":true,"mount_layout":"%s","filesystem_type":"%s","total_bytes":%s,"service_usable_bytes":%s,"uuid_present":true,"fstab_uuid_match":true,"bind_source_match":%s,"bind_dependency_match":%s}\n' \
+  "$mount_layout" "$filesystem_type" "$total_bytes" "$service_usable_bytes" \
+  "$bind_source_match" "$bind_dependency_match"
