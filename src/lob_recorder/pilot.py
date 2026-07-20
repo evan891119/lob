@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from lob_recorder.models import TAIPEI
@@ -13,6 +13,49 @@ TRADING_DAYS_PER_YEAR = 250
 
 def _rows(result) -> list[dict]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+def _scope_part_metrics(
+    part_rows: list[dict], market_rows: list[dict], *, filtered: bool
+) -> tuple[int, int, int]:
+    selected_rows_by_table: dict[str, int] = {}
+    for row in market_rows:
+        table = str(row["table"])
+        selected_rows_by_table[table] = selected_rows_by_table.get(table, 0) + int(row["rows"])
+
+    for row in part_rows:
+        table = str(row["table"])
+        active_rows = int(row["rows"])
+        selected_rows = selected_rows_by_table.get(table, 0)
+        if filtered:
+            row_fraction = min(1.0, selected_rows / active_rows) if active_rows else 0.0
+            method = "estimated_by_table_row_share_of_active_parts"
+        else:
+            selected_rows = active_rows
+            row_fraction = 1.0 if active_rows else 0.0
+            method = "exact_active_parts"
+        row["scope_rows"] = selected_rows
+        row["scope_row_fraction"] = round(row_fraction, 9)
+        row["scope_measurement"] = method
+        for source, target in (
+            ("bytes_on_disk", "scope_bytes_on_disk"),
+            ("compressed_data_bytes", "scope_compressed_data_bytes"),
+            ("uncompressed_data_bytes", "scope_uncompressed_data_bytes"),
+        ):
+            row[target] = round(int(row[source]) * row_fraction)
+        scoped_compressed = int(row["scope_compressed_data_bytes"])
+        scoped_uncompressed = int(row["scope_uncompressed_data_bytes"])
+        row["scope_compression_ratio"] = (
+            round(scoped_uncompressed / scoped_compressed, 3)
+            if scoped_compressed
+            else None
+        )
+
+    return (
+        sum(int(row["scope_bytes_on_disk"]) for row in part_rows),
+        sum(int(row["scope_compressed_data_bytes"]) for row in part_rows),
+        sum(int(row["scope_uncompressed_data_bytes"]) for row in part_rows),
+    )
 
 
 def _capacity_projections(
@@ -130,7 +173,20 @@ def _capacity_projections(
     }
 
 
-def collect_report(host: str, output: str | Path, storage_total: int | None = None) -> Path:
+def collect_report(
+    host: str,
+    output: str | Path,
+    storage_total: int | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> Path:
+    if (start_date is None) != (end_date is None):
+        raise ValueError("start_date and end_date must be provided together")
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise ValueError("start_date must be on or before end_date")
+    if storage_total is not None and storage_total <= 0:
+        raise ValueError("storage_total must be positive")
+
     import clickhouse_connect
 
     client = clickhouse_connect.get_client(
@@ -139,7 +195,22 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         connect_timeout=5,
         send_receive_timeout=30,
     )
-    market = client.query("""
+    filtered = start_date is not None
+    query_parameters = (
+        {"start_date": start_date, "end_date": end_date} if filtered else {}
+    )
+    market_filter = (
+        "WHERE trading_date BETWEEN {start_date:Date} AND {end_date:Date}"
+        if filtered
+        else ""
+    )
+    audit_filter = (
+        "WHERE toDate(started_at) <= {end_date:Date} "
+        "AND toDate(ifNull(ended_at, now64(6))) >= {start_date:Date}"
+        if filtered
+        else ""
+    )
+    market = client.query(f"""
         SELECT table, security_type, exchange, symbol, trading_date, count() AS rows,
                min(event_ts) AS first_event_ts, max(event_ts) AS last_event_ts,
                round(if(dateDiff('millisecond', first_event_ts, last_event_ts) > 0,
@@ -149,14 +220,14 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                round(quantileExact(0.99)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p99
         FROM (
           SELECT 'lob_events' AS table, security_type, exchange, symbol,
-                 trading_date, event_ts, received_ts FROM lob_events
+                 trading_date, event_ts, received_ts FROM lob_events {market_filter}
           UNION ALL
           SELECT 'tick_events' AS table, security_type, exchange, symbol,
-                 trading_date, event_ts, received_ts FROM tick_events
+                 trading_date, event_ts, received_ts FROM tick_events {market_filter}
         ) GROUP BY table, security_type, exchange, symbol, trading_date
         ORDER BY table, security_type, exchange, symbol, trading_date
-    """)
-    peaks = client.query("""
+    """, parameters=query_parameters)
+    peaks = client.query(f"""
         SELECT table, security_type, exchange, symbol, trading_date,
                max(events_in_second) AS peak_events_per_second
         FROM (
@@ -165,15 +236,15 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                  count() AS events_in_second
           FROM (
             SELECT 'lob_events' AS table, security_type, exchange, symbol,
-                   trading_date, event_ts FROM lob_events
+                   trading_date, event_ts FROM lob_events {market_filter}
             UNION ALL
             SELECT 'tick_events' AS table, security_type, exchange, symbol,
-                   trading_date, event_ts FROM tick_events
+                   trading_date, event_ts FROM tick_events {market_filter}
           )
           GROUP BY table, security_type, exchange, symbol, trading_date, event_second
         ) GROUP BY table, security_type, exchange, symbol, trading_date
         ORDER BY table, security_type, exchange, symbol, trading_date
-    """)
+    """, parameters=query_parameters)
     parts = client.query("""
         SELECT table, sum(rows) AS rows,
                sum(bytes_on_disk) AS bytes_on_disk,
@@ -183,7 +254,7 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         WHERE active AND database = 'lob' AND table IN ('lob_events', 'tick_events')
         GROUP BY table ORDER BY table
     """)
-    sessions = client.query("""
+    sessions = client.query(f"""
         SELECT session_id, started_at, ended_at, status, symbols, subscription_results,
                received, written, spooled, replayed, dropped,
                reconnects, queue_capacity, queue_high_water,
@@ -196,13 +267,14 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                    process_cpu_seconds * 1000.0 * 100.0 /
                    dateDiff('millisecond', started_at, ifNull(ended_at, now64(6))), 0), 3)
                    AS average_process_cpu_percent
-        FROM capture_sessions_latest ORDER BY started_at
-    """)
-    gaps = client.query("""
+        FROM capture_sessions_latest {audit_filter} ORDER BY started_at
+    """, parameters=query_parameters)
+    gaps = client.query(f"""
         SELECT category, count() AS intervals, sum(affected_count) AS affected_count,
                countIf(ended_at IS NULL) AS open_intervals
-        FROM capture_gaps_latest GROUP BY category ORDER BY category
-    """)
+        FROM capture_gaps_latest {audit_filter}
+        GROUP BY category ORDER BY category
+    """, parameters=query_parameters)
     market_rows = _rows(market)
     peak_by_group = {
         (
@@ -224,9 +296,14 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         compressed = int(row["compressed_data_bytes"])
         uncompressed = int(row["uncompressed_data_bytes"])
         row["compression_ratio"] = round(uncompressed / compressed, 3) if compressed else None
-    total_bytes_on_disk = sum(int(row["bytes_on_disk"]) for row in part_rows)
-    total_compressed_data_bytes = sum(int(row["compressed_data_bytes"]) for row in part_rows)
-    total_uncompressed_data_bytes = sum(int(row["uncompressed_data_bytes"]) for row in part_rows)
+    global_bytes_on_disk = sum(int(row["bytes_on_disk"]) for row in part_rows)
+    global_compressed_data_bytes = sum(int(row["compressed_data_bytes"]) for row in part_rows)
+    global_uncompressed_data_bytes = sum(int(row["uncompressed_data_bytes"]) for row in part_rows)
+    (
+        total_bytes_on_disk,
+        total_compressed_data_bytes,
+        total_uncompressed_data_bytes,
+    ) = _scope_part_metrics(part_rows, market_rows, filtered=filtered)
     compression_ratio = (
         round(total_uncompressed_data_bytes / total_compressed_data_bytes, 3)
         if total_compressed_data_bytes
@@ -269,6 +346,16 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
     )
     report = {
         "generated_at": datetime.now(TAIPEI).isoformat(),
+        "report_scope": {
+            "start_date": start_date.isoformat() if start_date is not None else None,
+            "end_date": end_date.isoformat() if end_date is not None else None,
+            "inclusive": True,
+            "market_storage_measurement": (
+                "estimated_by_table_row_share_of_active_parts"
+                if filtered
+                else "exact_active_parts"
+            ),
+        },
         "market": market_rows,
         "market_parts": part_rows,
         "capture_sessions": _rows(sessions),
@@ -278,6 +365,11 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         "compressed_data_bytes": total_compressed_data_bytes,
         "uncompressed_data_bytes": total_uncompressed_data_bytes,
         "compression_ratio": compression_ratio,
+        "global_active_parts": {
+            "bytes_on_disk": global_bytes_on_disk,
+            "compressed_data_bytes": global_compressed_data_bytes,
+            "uncompressed_data_bytes": global_uncompressed_data_bytes,
+        },
         "storage": storage,
         "capacity_projections": projections,
     }

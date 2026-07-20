@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,7 +17,11 @@ class Result:
 
 
 class FakeClient:
-    def query(self, statement):
+    def __init__(self):
+        self.queries = []
+
+    def query(self, statement, parameters=None):
+        self.queries.append((statement, parameters or {}))
         if "peak_events_per_second" in statement:
             return Result(
                 [
@@ -60,7 +65,8 @@ class FakeClient:
 
 class PilotTests(unittest.TestCase):
     def test_report_includes_peak_eps_compression_and_retention_estimate(self):
-        fake_module = SimpleNamespace(get_client=lambda **_kwargs: FakeClient())
+        client = FakeClient()
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: client)
         with tempfile.TemporaryDirectory() as folder, patch.dict(
             sys.modules, {"clickhouse_connect": fake_module}
         ):
@@ -69,6 +75,7 @@ class PilotTests(unittest.TestCase):
             report = json.loads(output.read_text())
 
         self.assertEqual(report["market"][0]["peak_events_per_second"], 12)
+        self.assertEqual(report["report_scope"]["market_storage_measurement"], "exact_active_parts")
         self.assertEqual(report["bytes_on_disk"], 1_000)
         self.assertEqual(report["compressed_data_bytes"], 400)
         self.assertEqual(report["uncompressed_data_bytes"], 1_600)
@@ -102,8 +109,8 @@ class PilotTests(unittest.TestCase):
 
     def test_report_marks_minimum_and_recommended_pilot_scope(self):
         class FiveDayClient(FakeClient):
-            def query(self, statement):
-                result = super().query(statement)
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
                 if "average_events_per_second" in statement:
                     rows = []
                     for day in range(2, 7):
@@ -135,8 +142,8 @@ class PilotTests(unittest.TestCase):
 
     def test_scope_distinguishes_same_symbol_across_market_identity(self):
         class SameSymbolClient(FakeClient):
-            def query(self, statement):
-                result = super().query(statement)
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
                 if "average_events_per_second" in statement:
                     rows = [
                         (
@@ -163,10 +170,66 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(report["pilot_scope"]["observed_products"], 3)
         self.assertTrue(report["pilot_scope"]["minimum_product_count_reached"])
 
+    def test_date_scope_filters_queries_and_estimates_storage_by_table_row_share(self):
+        class ScopedClient(FakeClient):
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
+                if "system.parts" in statement:
+                    return Result(
+                        result.column_names,
+                        [("lob_events", 1_000, 10_000, 4_000, 16_000)],
+                    )
+                return result
+
+        client = ScopedClient()
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: client)
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            output = Path(folder) / "pilot.json"
+            collect_report(
+                "clickhouse", output, storage_total=20_000,
+                start_date=date(2026, 1, 2), end_date=date(2026, 1, 2),
+            )
+            report = json.loads(output.read_text())
+
+        self.assertEqual(report["report_scope"]["start_date"], "2026-01-02")
+        self.assertEqual(
+            report["report_scope"]["market_storage_measurement"],
+            "estimated_by_table_row_share_of_active_parts",
+        )
+        self.assertEqual(report["market_parts"][0]["scope_row_fraction"], 0.1)
+        self.assertEqual(report["bytes_on_disk"], 1_000)
+        self.assertEqual(report["global_active_parts"]["bytes_on_disk"], 10_000)
+        filtered_queries = [statement for statement, _parameters in client.queries if "BETWEEN" in statement]
+        overlap_queries = [
+            statement for statement, _parameters in client.queries
+            if "toDate(ifNull(ended_at" in statement
+        ]
+        self.assertEqual(len(filtered_queries), 2)
+        self.assertEqual(len(overlap_queries), 2)
+        for _statement, parameters in client.queries:
+            if parameters:
+                self.assertEqual(parameters["start_date"], date(2026, 1, 2))
+                self.assertEqual(parameters["end_date"], date(2026, 1, 2))
+
+    def test_date_scope_requires_a_complete_ordered_range(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "pilot.json"
+            with self.assertRaisesRegex(ValueError, "provided together"):
+                collect_report("clickhouse", output, start_date=date(2026, 1, 2))
+            with self.assertRaisesRegex(ValueError, "on or before"):
+                collect_report(
+                    "clickhouse", output,
+                    start_date=date(2026, 1, 3), end_date=date(2026, 1, 2),
+                )
+            with self.assertRaisesRegex(ValueError, "positive"):
+                collect_report("clickhouse", output, storage_total=0)
+
     def test_empty_dataset_does_not_invent_retention(self):
         class EmptyClient(FakeClient):
-            def query(self, statement):
-                result = super().query(statement)
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
                 if "average_events_per_second" in statement or "peak_events_per_second" in statement:
                     return Result(result.column_names, [])
                 if "system.parts" in statement:

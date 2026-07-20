@@ -8,6 +8,8 @@
 - 商品：3–5 個不同活躍度的公開商品代碼
 - ClickHouse 可用容量（bytes）：
 - 實際採集小時：
+- `report_scope.market_storage_measurement`：
+- scoped bytes 是 exact／row-share estimate：
 
 ## 實測結果
 

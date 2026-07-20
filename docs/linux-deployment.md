@@ -169,10 +169,14 @@ docker compose exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/symbol=2330/trading_date=2026-01-02/*.parquet'
 
 docker compose exec -T collector lob-recorder pilot-report \
-  --host clickhouse --output /var/lib/lob/parquet/pilot-report.json
+  --host clickhouse \
+  --start-date 2026-01-02 --end-date 2026-01-06 \
+  --output /var/lib/lob/parquet/pilot-report.json
 ```
 
-未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會分開輸出 ClickHouse `bytes_on_disk`、`compressed_data_bytes`、`uncompressed_data_bytes` 與 `compression_ratio`；ratio 定義為 `uncompressed / compressed`，例如 `4.0` 代表資料壓縮為原始大小的約四分之一。Retention 使用實際 `bytes_on_disk` 的每日平均值估算，不拿壓縮前資料量代替磁碟占用。
+正式 pilot 必須同時指定 inclusive `--start-date` 與 `--end-date`，讓 market、peak、session 與 gap 只包含該次 pilot 範圍，避免把先前 fixture 或試跑資料混入。只給其中一個日期、日期倒置或非正容量 override 都會 fail closed。完全不指定日期仍可產生全資料庫診斷，但不可作為 scoped pilot 最終容量證據。
+
+未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會分開輸出 ClickHouse `bytes_on_disk`、`compressed_data_bytes`、`uncompressed_data_bytes` 與 `compression_ratio`；ratio 定義為 `uncompressed / compressed`，例如 `4.0` 代表資料壓縮為原始大小的約四分之一。未使用日期 filter 時，這些數字是所有 active parts 的 exact totals；使用日期 filter 時，因目前 partition granularity 是月，scope bytes 會依各 table 的 scoped rows / active-part rows 等比例估算，並明確標為 `estimated_by_table_row_share_of_active_parts`。`global_active_parts` 仍保存 exact totals 供核對，retention/projection 使用 scoped estimate；不得把估算標成實際逐日磁碟 bytes。
 
 `pilot_scope` 會按 `security_type + exchange + symbol` 回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。這些 checks 只描述資料庫中可觀測的範圍，不能證明其中任何一天涵蓋完整交易時段；完整時段仍由部署者依 collector start/end 與市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。
 

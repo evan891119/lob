@@ -7,7 +7,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from lob_recorder.acceptance import collect_acceptance_report, write_acceptance_report
@@ -274,10 +274,20 @@ def command_export(args) -> None:
 
 
 def command_pilot_report(args) -> None:
+    if (args.start_date is None) != (args.end_date is None):
+        raise SystemExit("pilot report requires --start-date and --end-date together")
+    if args.start_date is not None and args.start_date > args.end_date:
+        raise SystemExit("pilot report start date must be on or before end date")
     storage_bytes = args.storage_total_bytes
     if storage_bytes is None:
         storage_bytes = usable_bytes(env("LOB_STORAGE_ROOT", "/var/lib/lob"))
-    collect_report(args.host, args.output, storage_bytes)
+    collect_report(
+        args.host,
+        args.output,
+        storage_bytes,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     print("pilot report complete")
 
 
@@ -342,7 +352,7 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
     quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.set_defaults(func=command_quality)
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
-    pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.set_defaults(func=command_pilot_report)
+    pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.add_argument("--start-date", type=date.fromisoformat); pilot.add_argument("--end-date", type=date.fromisoformat); pilot.set_defaults(func=command_pilot_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)
     network_outage = sub.add_parser("network-outage-verify"); network_outage.add_argument("--before", required=True); network_outage.add_argument("--after", required=True); network_outage.add_argument("--outage-seconds", required=True, type=int); network_outage.add_argument("--output", required=True); network_outage.set_defaults(func=command_network_outage_verify)
