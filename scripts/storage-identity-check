@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 1 || { echo "usage: sudo scripts/storage-identity-check ABSOLUTE_DATA_ROOT" >&2; exit 2; }
+
+root="$1"
+test "${root#/}" != "$root" && test "$root" != "/" \
+  || { echo "unsafe storage root" >&2; exit 1; }
+mountpoint -q "$root" || { echo "storage root is not a mount point" >&2; exit 1; }
+
+target="$(findmnt -n --target "$root" -o TARGET)"
+test "$target" = "$root" || { echo "storage mount target does not match" >&2; exit 1; }
+filesystem_type="$(findmnt -n --target "$root" -o FSTYPE)"
+case "$filesystem_type" in
+  ext4|xfs) ;;
+  *) echo "storage filesystem type is unsupported" >&2; exit 1 ;;
+esac
+
+source_device="$(findmnt -n --target "$root" -o SOURCE)"
+test -n "$source_device" || { echo "storage source is unavailable" >&2; exit 1; }
+uuid="$(blkid -s UUID -o value "$source_device" 2>/dev/null || true)"
+test -n "$uuid" || { echo "storage filesystem UUID is unavailable" >&2; exit 1; }
+
+fstab_file="/etc/fstab"
+if test "${LOB_STORAGE_IDENTITY_TEST_ONLY:-false}" = "true"; then
+  test -n "${LOB_STORAGE_IDENTITY_FSTAB:-}" \
+    || { echo "test fstab path is required" >&2; exit 1; }
+  fstab_file="$LOB_STORAGE_IDENTITY_FSTAB"
+fi
+test -f "$fstab_file" || { echo "fstab is unavailable" >&2; exit 1; }
+awk -v expected="UUID=$uuid" -v target="$root" '
+  $1 == expected && $2 == target { found = 1 }
+  END { exit(found ? 0 : 1) }
+' "$fstab_file" || { echo "fstab UUID entry does not match storage mount" >&2; exit 1; }
+
+set -- $(df -B1 --output=size,used,avail "$root" | awk 'NR == 2 { print $1, $2, $3 }')
+test "$#" -eq 3 || { echo "storage capacity is unavailable" >&2; exit 1; }
+total_bytes="$1"
+used_bytes="$2"
+available_bytes="$3"
+case "$total_bytes:$used_bytes:$available_bytes" in
+  *[!0-9:]*|::*|:*:|:*) echo "storage capacity is invalid" >&2; exit 1 ;;
+esac
+service_usable_bytes=$((used_bytes + available_bytes))
+
+printf '{"mountpoint":true,"filesystem_type":"%s","total_bytes":%s,"service_usable_bytes":%s,"uuid_present":true,"fstab_uuid_match":true}\n' \
+  "$filesystem_type" "$total_bytes" "$service_usable_bytes"

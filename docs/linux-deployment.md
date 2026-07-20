@@ -12,10 +12,12 @@
 先確認 20TB 磁碟實際掛載到選定位置，再準備目錄。Script 會拒絕普通目錄，以防磁碟未掛載時誤寫系統碟。
 
 ```bash
-findmnt /mnt/lob-data
 sudo scripts/host-prepare /mnt/lob-data
 sudo scripts/storage-check /mnt/lob-data
+sudo scripts/storage-identity-check /mnt/lob-data
 ```
+
+`storage-identity-check` 是唯讀驗收：確認 mount target、ext4/XFS、filesystem UUID 與 `/etc/fstab` 的 `UUID=` entry，並只輸出 filesystem 類型、總 bytes、service 可用 bytes 與布林結果；不輸出 device path、UUID 值、hostname 或個人路徑。`fstab_uuid_match=true` 只證明設定存在，仍需在安排好的重新開機後重跑本指令與 `acceptance-check`，才能證明自動掛載及資料服務恢復。
 
 `host-prepare` 會建立 `.lob-storage-root` marker、ClickHouse 目錄及 UID `10001` 擁有的 `parquet/`、`spool/`、`backup/`、`private-runtime/`。資料根目錄本身由 root 擁有；collector 只讀掛載根目錄，再將 `parquet/`、`spool/`、`private-runtime/` 疊加為可寫 bind mounts，`backup/` 保留給 host 維護流程，不掛成 collector 可寫路徑。因此 collector 不能改名或刪除 ClickHouse/backup 目錄。ClickHouse 目錄依 pinned image UID/GID `101:101` 設定；升級 image 前需重新確認 UID/GID。
 

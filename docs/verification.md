@@ -4,7 +4,7 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 62 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 65 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
 - Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
@@ -22,6 +22,7 @@
 - Private runtime inventory：containerized management path 不需 host Python；實際 runtime purge 清除 2 個檔案後保留 mount root inode、Parquet 與行情 tables；一筆 spool purge 留下 closed `manual_spool_purge` gap（affected count 1）。
 - Pilot report unit proof：合併 average/peak EPS，並以實際 parts compressed bytes、觀測交易日與 filesystem usable bytes 產生 90% 水位 retention estimate；空資料集不臆測保留天數。
 - Acceptance report no-leak proof：health 中注入假的 session/account/unknown canary 後輸出不含原文；health 不可讀時只回傳安全 unavailable 狀態。Wrapper 先以 metadata-only 驗證 repo 外 credential 是絕對路徑、非 symlink regular file 且 mode `0600`，再執行 storage check、Compose config 與 read-only ClickHouse/health 查詢；report 另分開判斷 STK/FUT/OPT 是否各自同時具有 BidAsk/Tick rows。
+- Storage identity wrapper proof：只接受 ext4/XFS 與 exact mount target，要求 filesystem UUID 對應 `/etc/fstab` 的 `UUID=` entry；成功輸出只有 filesystem 類型、容量 bytes 與布林結果，device/UUID canary 不會出現在 stdout/stderr。這不取代實際 reboot 後重跑。
 
 ## 部署者確認的外部證據
 
