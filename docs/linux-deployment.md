@@ -92,7 +92,7 @@ sudo scripts/acceptance-check /mnt/lob-data /etc/shioaji-lob-recorder/host.env
 sudo cat /mnt/lob-data/parquet/acceptance-report.json
 ```
 
-工具不會停止、重啟或清除服務，也不會讀取 Shioaji 原始 log。Report 不包含 session ID、credential、帳戶、主機名稱或 host path；只包含公開商品、rows、時間範圍、simulation/subscription 狀態、queue/capacity counters 與彙總 gap。`checks` 中的 `health_fresh`、`collector_operational`、`simulation_only`、`subscriptions_active`、`both_streams_present`、`current_session_no_drops`、`no_open_gaps` 與 `storage_below_stop_threshold` 用於當下檢查；`pilot_scope_reached` 只有至少三個商品及一個交易日才會成立。
+工具會先確認 `host.env` 指向同一個資料根目錄，並以 metadata-only 方式驗證 `LOB_CREDENTIAL_FILE` 是絕對路徑、非 symlink regular file 且主機 mode 為 `0600`；不讀 credential 內容，也不把路徑寫入 report。工具不會停止、重啟或清除服務，也不會讀取 Shioaji 原始 log。Report 不包含 session ID、credential、帳戶、主機名稱或 host path；只包含公開商品、rows、時間範圍、simulation/subscription 狀態、queue/capacity counters 與彙總 gap。`checks` 中的 `health_fresh`、`collector_operational`、`simulation_only`、`subscriptions_active`、`both_streams_present`、`stock_both_streams_present`、`futures_both_streams_present`、`options_both_streams_present`、`current_session_no_drops`、`no_open_gaps` 與 `storage_below_stop_threshold` 用於當下檢查；各商品類型的雙 stream check 只有該類型至少一個實際 symbol 同時存在 BidAsk/Tick rows 才會成立。`pilot_scope_reached` 只有至少三個實際 symbol 及一個交易日才會成立，仍不代表完整交易時段或 3–5 個設定商品已驗收。
 
 這份摘要只能保存執行當下的證據，不能單獨證明重新開機後 mount 持續存在、完整交易時段、刻意斷線/outage recovery 或多日 pilot；這些 gate 必須在相應操作之後重新執行並由部署者確認。
 

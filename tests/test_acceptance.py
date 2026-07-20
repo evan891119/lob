@@ -23,22 +23,34 @@ class FakeClient:
             return Result([{
                 "lob_rows": 20,
                 "tick_rows": 10,
-                "symbols": 1,
+                "symbols": 2,
                 "trading_days": 1,
                 "first_event_ts": "2026-01-02 09:00:00",
                 "last_event_ts": "2026-01-02 09:01:00",
             }])
         if "GROUP BY security_type" in statement:
-            return Result([{
-                "security_type": "STK",
-                "exchange": "TSE",
-                "symbol": "2330",
-                "lob_rows": 20,
-                "tick_rows": 10,
-                "trading_days": 1,
-                "first_event_ts": "2026-01-02 09:00:00",
-                "last_event_ts": "2026-01-02 09:01:00",
-            }])
+            return Result([
+                {
+                    "security_type": "STK",
+                    "exchange": "TSE",
+                    "symbol": "2330",
+                    "lob_rows": 20,
+                    "tick_rows": 10,
+                    "trading_days": 1,
+                    "first_event_ts": "2026-01-02 09:00:00",
+                    "last_event_ts": "2026-01-02 09:01:00",
+                },
+                {
+                    "security_type": "FUT",
+                    "exchange": "TAIFEX",
+                    "symbol": "TXF_TEST",
+                    "lob_rows": 8,
+                    "tick_rows": 2,
+                    "trading_days": 1,
+                    "first_event_ts": "2026-01-02 09:00:00",
+                    "last_event_ts": "2026-01-02 09:01:00",
+                },
+            ])
         if "capture_sessions_latest" in statement:
             return Result([{
                 "status": "active",
@@ -111,6 +123,9 @@ class AcceptanceTests(unittest.TestCase):
         self.assertTrue(report["checks"]["health_fresh"])
         self.assertTrue(report["checks"]["simulation_only"])
         self.assertTrue(report["checks"]["both_streams_present"])
+        self.assertTrue(report["checks"]["stock_both_streams_present"])
+        self.assertTrue(report["checks"]["futures_both_streams_present"])
+        self.assertFalse(report["checks"]["options_both_streams_present"])
         self.assertTrue(report["checks"]["no_open_gaps"])
         self.assertFalse(report["checks"]["pilot_scope_reached"])
 

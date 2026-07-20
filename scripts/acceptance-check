@@ -14,6 +14,19 @@ test -n "$configured_root" && test "$(printf '%s\n' "$configured_root" | wc -l |
   || { echo "host config must contain one plain LOB_DATA_ROOT value" >&2; exit 1; }
 test "$configured_root" = "$data_root" \
   || { echo "data root does not match host config" >&2; exit 1; }
+configured_credential="$(sed -n 's/^LOB_CREDENTIAL_FILE=//p' "$host_env")"
+test -n "$configured_credential" \
+  && test "$(printf '%s\n' "$configured_credential" | wc -l | tr -d ' ')" -eq 1 \
+  || { echo "host config must contain one plain LOB_CREDENTIAL_FILE value" >&2; exit 1; }
+case "$configured_credential" in
+  /*) ;;
+  *) echo "credential file must use an absolute host path" >&2; exit 1 ;;
+esac
+test "$configured_credential" != "/" && test -f "$configured_credential" \
+  && test ! -L "$configured_credential" \
+  || { echo "credential file metadata check failed" >&2; exit 1; }
+test "$(stat -c '%a' "$configured_credential")" = "600" \
+  || { echo "credential file mode must be 0600" >&2; exit 1; }
 
 scripts/storage-check "$data_root"
 docker compose --env-file "$host_env" config --quiet

@@ -204,6 +204,15 @@ def collect_acceptance_report(
     lob_rows = int(totals["lob_rows"])
     tick_rows = int(totals["tick_rows"])
     capacity = health["storage_capacity"]
+    streams_by_security_type = {
+        security_type: any(
+            row["security_type"] == security_type
+            and row["lob_rows"] > 0
+            and row["tick_rows"] > 0
+            for row in symbols
+        )
+        for security_type in ("STK", "FUT", "OPT")
+    }
     checks = {
         "health_fresh": bool(health["fresh"]),
         "collector_operational": health["status"] in {"running", "degraded"},
@@ -211,6 +220,9 @@ def collect_acceptance_report(
         "subscriptions_active": health["subscriptions_active"] > 0,
         "market_rows_present": lob_rows + tick_rows > 0,
         "both_streams_present": lob_rows > 0 and tick_rows > 0,
+        "stock_both_streams_present": streams_by_security_type["STK"],
+        "futures_both_streams_present": streams_by_security_type["FUT"],
+        "options_both_streams_present": streams_by_security_type["OPT"],
         "current_session_no_drops": bool(session and session["dropped"] == 0),
         "no_open_gaps": all(row["open_intervals"] == 0 for row in gaps),
         "storage_below_stop_threshold": bool(capacity and capacity["used_percent"] < 90),
