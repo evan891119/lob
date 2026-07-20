@@ -37,10 +37,11 @@
 - Privacy-safe acceptance report 顯示 health fresh/running、simulation、`2330` 與 `TXFR1→TXFH6` 四個 subscriptions active/零 failed，STK/FUT 各自 BidAsk/Tick rows 皆存在；LOB/Tick 總列數為 `79,657/18,576`，當下 drop/spool/replay/reconnect/clock anomaly 均 `0`，三個既有 gap intervals 全部 closed，storage used `8.12%`。Wrapper 成功亦證明當下 mount/layout/marker、Compose config 與 credential path/type/`0600` metadata 通過。
 - 新 collector session 起於 `13:16`，database 仍含 `10:53` 起的 rows，證明 collector rebuild/recreate 未破壞既有 ClickHouse 歷史資料；不擴大解讀為 host reboot 或 ClickHouse restore 驗收。
 - Privacy-safe storage identity report 顯示 shared ext4 bind layout、底層 UUID/`fstab`、bind source 與 systemd dependency 全部通過；filesystem total `19,919,910,756,352` bytes、service usable `18,919,865,425,920` bytes。Report 不含 UUID 值、device、hostname 或 host path。
+- Privacy-safe Docker boot readiness report 顯示 `docker.service` enabled/active、Compose config valid、ClickHouse/collector running，且實際 restart policies 全部符合 `unless-stopped`。Report 不含 host path、container ID 或 hostname；不擴大解讀為實際 reboot persistence。
 
 ## 必須在目標 Linux/外部環境完成
 
-- 目標 Docker boot readiness；實際重新開機後掛載／服務恢復由部署者因共用主機決定延後，維持未驗證。
+- 實際重新開機後掛載／服務恢復由部署者因共用主機決定延後，維持未驗證。
 - OPT 交易時段訂閱；STK＋FUT 兩商品 live gate 已由部署者確認。
 - 目標 Linux 上的長時間 database outage、ClickHouse/host restart、網路斷線與 replay 測試。
 - 至少一完整交易日、建議五日的 3–5 商品 pilot。
