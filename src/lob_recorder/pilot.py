@@ -6,9 +6,128 @@ from pathlib import Path
 
 from lob_recorder.models import TAIPEI
 
+PROJECTION_PRODUCT_COUNTS = (10, 50, 100)
+TRADING_DAYS_PER_MONTH = 20
+TRADING_DAYS_PER_YEAR = 250
+
 
 def _rows(result) -> list[dict]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+def _capacity_projections(
+    market_rows: list[dict],
+    *,
+    observed_products: int,
+    trading_days: int,
+    total_bytes_on_disk: int,
+    stop_bytes: int | None,
+) -> dict:
+    daily_average_eps: dict[str, float] = {}
+    daily_conservative_peak_sum_eps: dict[str, float] = {}
+    for row in market_rows:
+        trading_date = str(row["trading_date"])
+        daily_average_eps[trading_date] = (
+            daily_average_eps.get(trading_date, 0.0)
+            + float(row["average_events_per_second"])
+        )
+        daily_conservative_peak_sum_eps[trading_date] = (
+            daily_conservative_peak_sum_eps.get(trading_date, 0.0)
+            + float(row["peak_events_per_second"])
+        )
+
+    basis_units = observed_products * trading_days
+    bytes_per_product_trading_day = (
+        total_bytes_on_disk / basis_units if basis_units else None
+    )
+    average_aggregate_eps = (
+        sum(daily_average_eps.values()) / trading_days if trading_days else None
+    )
+    conservative_peak_sum_eps = (
+        max(daily_conservative_peak_sum_eps.values())
+        if daily_conservative_peak_sum_eps
+        else None
+    )
+    average_eps_per_product = (
+        average_aggregate_eps / observed_products
+        if average_aggregate_eps is not None and observed_products
+        else None
+    )
+    conservative_peak_sum_eps_per_product = (
+        conservative_peak_sum_eps / observed_products
+        if conservative_peak_sum_eps is not None and observed_products
+        else None
+    )
+
+    targets = []
+    for products in PROJECTION_PRODUCT_COUNTS:
+        bytes_per_day = (
+            round(bytes_per_product_trading_day * products)
+            if bytes_per_product_trading_day is not None
+            else None
+        )
+        targets.append(
+            {
+                "products": products,
+                "estimated_average_events_per_second": (
+                    round(average_eps_per_product * products, 3)
+                    if average_eps_per_product is not None
+                    else None
+                ),
+                "estimated_conservative_peak_sum_events_per_second": (
+                    round(conservative_peak_sum_eps_per_product * products, 3)
+                    if conservative_peak_sum_eps_per_product is not None
+                    else None
+                ),
+                "estimated_bytes_per_trading_day": bytes_per_day,
+                "estimated_bytes_per_20_trading_days": (
+                    bytes_per_day * TRADING_DAYS_PER_MONTH if bytes_per_day is not None else None
+                ),
+                "estimated_bytes_per_250_trading_days": (
+                    bytes_per_day * TRADING_DAYS_PER_YEAR if bytes_per_day is not None else None
+                ),
+                "estimated_one_full_copy_backup_bytes_per_20_trading_days": (
+                    bytes_per_day * TRADING_DAYS_PER_MONTH if bytes_per_day is not None else None
+                ),
+                "estimated_one_full_copy_backup_bytes_per_250_trading_days": (
+                    bytes_per_day * TRADING_DAYS_PER_YEAR if bytes_per_day is not None else None
+                ),
+                "estimated_retention_trading_days_at_90_percent": (
+                    stop_bytes // bytes_per_day
+                    if stop_bytes is not None and bytes_per_day
+                    else None
+                ),
+            }
+        )
+
+    return {
+        "basis": {
+            "observed_products": observed_products,
+            "observed_trading_days": trading_days,
+            "minimum_dataset_scope_reached": observed_products >= 3 and trading_days >= 1,
+            "bytes_on_disk_per_product_trading_day": (
+                round(bytes_per_product_trading_day)
+                if bytes_per_product_trading_day is not None
+                else None
+            ),
+            "average_aggregate_events_per_second": (
+                round(average_aggregate_eps, 3) if average_aggregate_eps is not None else None
+            ),
+            "conservative_peak_sum_events_per_second": (
+                round(conservative_peak_sum_eps, 3)
+                if conservative_peak_sum_eps is not None
+                else None
+            ),
+        },
+        "assumptions": {
+            "linear_scaling_by_product_count": True,
+            "trading_days_per_month": TRADING_DAYS_PER_MONTH,
+            "trading_days_per_year": TRADING_DAYS_PER_YEAR,
+            "backup_model": "one_full_copy_of_new_market_data_only",
+            "peak_model": "sum_of_individual_stream_peaks_conservative_upper_bound",
+        },
+        "targets": targets,
+    }
 
 
 def collect_report(host: str, output: str | Path, storage_total: int | None = None) -> Path:
@@ -21,7 +140,7 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         send_receive_timeout=30,
     )
     market = client.query("""
-        SELECT table, symbol, trading_date, count() AS rows,
+        SELECT table, security_type, exchange, symbol, trading_date, count() AS rows,
                min(event_ts) AS first_event_ts, max(event_ts) AS last_event_ts,
                round(if(dateDiff('millisecond', first_event_ts, last_event_ts) > 0,
                    rows * 1000.0 / dateDiff('millisecond', first_event_ts, last_event_ts), 0), 3) AS average_events_per_second,
@@ -29,24 +148,31 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                round(quantileExact(0.95)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p95,
                round(quantileExact(0.99)(dateDiff('microsecond', event_ts, received_ts)) / 1000.0, 3) AS latency_ms_p99
         FROM (
-          SELECT 'lob_events' AS table, symbol, trading_date, event_ts, received_ts FROM lob_events
+          SELECT 'lob_events' AS table, security_type, exchange, symbol,
+                 trading_date, event_ts, received_ts FROM lob_events
           UNION ALL
-          SELECT 'tick_events' AS table, symbol, trading_date, event_ts, received_ts FROM tick_events
-        ) GROUP BY table, symbol, trading_date ORDER BY table, symbol, trading_date
+          SELECT 'tick_events' AS table, security_type, exchange, symbol,
+                 trading_date, event_ts, received_ts FROM tick_events
+        ) GROUP BY table, security_type, exchange, symbol, trading_date
+        ORDER BY table, security_type, exchange, symbol, trading_date
     """)
     peaks = client.query("""
-        SELECT table, symbol, trading_date, max(events_in_second) AS peak_events_per_second
+        SELECT table, security_type, exchange, symbol, trading_date,
+               max(events_in_second) AS peak_events_per_second
         FROM (
-          SELECT table, symbol, trading_date, toStartOfSecond(event_ts) AS event_second,
+          SELECT table, security_type, exchange, symbol, trading_date,
+                 toStartOfSecond(event_ts) AS event_second,
                  count() AS events_in_second
           FROM (
-            SELECT 'lob_events' AS table, symbol, trading_date, event_ts FROM lob_events
+            SELECT 'lob_events' AS table, security_type, exchange, symbol,
+                   trading_date, event_ts FROM lob_events
             UNION ALL
-            SELECT 'tick_events' AS table, symbol, trading_date, event_ts FROM tick_events
+            SELECT 'tick_events' AS table, security_type, exchange, symbol,
+                   trading_date, event_ts FROM tick_events
           )
-          GROUP BY table, symbol, trading_date, event_second
-        ) GROUP BY table, symbol, trading_date
-        ORDER BY table, symbol, trading_date
+          GROUP BY table, security_type, exchange, symbol, trading_date, event_second
+        ) GROUP BY table, security_type, exchange, symbol, trading_date
+        ORDER BY table, security_type, exchange, symbol, trading_date
     """)
     parts = client.query("""
         SELECT table, sum(rows) AS rows,
@@ -74,12 +200,19 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
     """)
     market_rows = _rows(market)
     peak_by_group = {
-        (row["table"], row["symbol"], str(row["trading_date"])): int(row["peak_events_per_second"])
+        (
+            row["table"], row["security_type"], row["exchange"],
+            row["symbol"], str(row["trading_date"]),
+        ): int(row["peak_events_per_second"])
         for row in _rows(peaks)
     }
     for row in market_rows:
         row["peak_events_per_second"] = peak_by_group.get(
-            (row["table"], row["symbol"], str(row["trading_date"])), 0
+            (
+                row["table"], row["security_type"], row["exchange"],
+                row["symbol"], str(row["trading_date"]),
+            ),
+            0,
         )
     part_rows = _rows(parts)
     for row in part_rows:
@@ -95,14 +228,19 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         else None
     )
     trading_days = len({str(row["trading_date"]) for row in market_rows})
-    observed_symbols = len({str(row["symbol"]) for row in market_rows})
+    observed_products = len(
+        {
+            (str(row["security_type"]), str(row["exchange"]), str(row["symbol"]))
+            for row in market_rows
+        }
+    )
     average_bytes_per_day = round(total_bytes_on_disk / trading_days) if trading_days else 0
     pilot_scope = {
-        "observed_symbols": observed_symbols,
+        "observed_products": observed_products,
         "observed_trading_days": trading_days,
-        "minimum_product_count_reached": observed_symbols >= 3,
-        "minimum_dataset_scope_reached": observed_symbols >= 3 and trading_days >= 1,
-        "recommended_five_day_scope_reached": observed_symbols >= 3 and trading_days >= 5,
+        "minimum_product_count_reached": observed_products >= 3,
+        "minimum_dataset_scope_reached": observed_products >= 3 and trading_days >= 1,
+        "recommended_five_day_scope_reached": observed_products >= 3 and trading_days >= 5,
     }
     storage = None
     if storage_total is not None:
@@ -117,6 +255,13 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
                 stop_bytes // average_bytes_per_day if average_bytes_per_day else None
             ),
         }
+    projections = _capacity_projections(
+        market_rows,
+        observed_products=observed_products,
+        trading_days=trading_days,
+        total_bytes_on_disk=total_bytes_on_disk,
+        stop_bytes=storage["stop_90_bytes"] if storage is not None else None,
+    )
     report = {
         "generated_at": datetime.now(TAIPEI).isoformat(),
         "market": market_rows,
@@ -129,6 +274,7 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         "uncompressed_data_bytes": total_uncompressed_data_bytes,
         "compression_ratio": compression_ratio,
         "storage": storage,
+        "capacity_projections": projections,
     }
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

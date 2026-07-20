@@ -19,17 +19,26 @@ class FakeClient:
     def query(self, statement):
         if "peak_events_per_second" in statement:
             return Result(
-                ["table", "symbol", "trading_date", "peak_events_per_second"],
-                [("lob_events", "2330", "2026-01-02", 12)],
+                [
+                    "table", "security_type", "exchange", "symbol",
+                    "trading_date", "peak_events_per_second",
+                ],
+                [("lob_events", "STK", "TSE", "2330", "2026-01-02", 12)],
             )
         if "average_events_per_second" in statement:
             return Result(
                 [
-                    "table", "symbol", "trading_date", "rows", "first_event_ts",
-                    "last_event_ts", "average_events_per_second", "latency_ms_p50",
-                    "latency_ms_p95", "latency_ms_p99",
+                    "table", "security_type", "exchange", "symbol", "trading_date",
+                    "rows", "first_event_ts", "last_event_ts",
+                    "average_events_per_second", "latency_ms_p50", "latency_ms_p95",
+                    "latency_ms_p99",
                 ],
-                [("lob_events", "2330", "2026-01-02", 100, "first", "last", 5, 1, 2, 3)],
+                [
+                    (
+                        "lob_events", "STK", "TSE", "2330", "2026-01-02",
+                        100, "first", "last", 5, 1, 2, 3,
+                    )
+                ],
             )
         if "system.parts" in statement:
             return Result(
@@ -66,6 +75,25 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(report["storage"]["observed_trading_days"], 1)
         self.assertEqual(report["storage"]["average_bytes_on_disk_per_day"], 1_000)
         self.assertEqual(report["storage"]["estimated_retention_days_at_90_percent"], 18)
+        projection = report["capacity_projections"]
+        self.assertFalse(projection["basis"]["minimum_dataset_scope_reached"])
+        self.assertEqual(projection["basis"]["bytes_on_disk_per_product_trading_day"], 1_000)
+        self.assertEqual(projection["basis"]["average_aggregate_events_per_second"], 5.0)
+        self.assertEqual(projection["basis"]["conservative_peak_sum_events_per_second"], 12.0)
+        ten_products = projection["targets"][0]
+        self.assertEqual(ten_products["products"], 10)
+        self.assertEqual(ten_products["estimated_average_events_per_second"], 50.0)
+        self.assertEqual(
+            ten_products["estimated_conservative_peak_sum_events_per_second"], 120.0
+        )
+        self.assertEqual(ten_products["estimated_bytes_per_trading_day"], 10_000)
+        self.assertEqual(ten_products["estimated_bytes_per_20_trading_days"], 200_000)
+        self.assertEqual(ten_products["estimated_bytes_per_250_trading_days"], 2_500_000)
+        self.assertEqual(
+            ten_products["estimated_one_full_copy_backup_bytes_per_250_trading_days"],
+            2_500_000,
+        )
+        self.assertEqual(ten_products["estimated_retention_trading_days_at_90_percent"], 1)
 
     def test_report_marks_minimum_and_recommended_pilot_scope(self):
         class FiveDayClient(FakeClient):
@@ -76,8 +104,11 @@ class PilotTests(unittest.TestCase):
                     for day in range(2, 7):
                         for symbol in ("2330", "2317", "TXFR1"):
                             rows.append(
-                                ("lob_events", symbol, f"2026-01-{day:02d}", 100,
-                                 "first", "last", 5, 1, 2, 3)
+                                (
+                                    "lob_events", "STK", "TSE", symbol,
+                                    f"2026-01-{day:02d}", 100,
+                                    "first", "last", 5, 1, 2, 3,
+                                )
                             )
                     return Result(result.column_names, rows)
                 if "peak_events_per_second" in statement:
@@ -92,10 +123,40 @@ class PilotTests(unittest.TestCase):
             collect_report("clickhouse", output)
             report = json.loads(output.read_text())
 
-        self.assertEqual(report["pilot_scope"]["observed_symbols"], 3)
+        self.assertEqual(report["pilot_scope"]["observed_products"], 3)
         self.assertEqual(report["pilot_scope"]["observed_trading_days"], 5)
         self.assertTrue(report["pilot_scope"]["minimum_dataset_scope_reached"])
         self.assertTrue(report["pilot_scope"]["recommended_five_day_scope_reached"])
+
+    def test_scope_distinguishes_same_symbol_across_market_identity(self):
+        class SameSymbolClient(FakeClient):
+            def query(self, statement):
+                result = super().query(statement)
+                if "average_events_per_second" in statement:
+                    rows = [
+                        (
+                            "lob_events", security_type, exchange, "SAME", "2026-01-02",
+                            100, "first", "last", 5, 1, 2, 3,
+                        )
+                        for security_type, exchange in (
+                            ("STK", "TSE"), ("FUT", "TAIFEX"), ("OPT", "TAIFEX")
+                        )
+                    ]
+                    return Result(result.column_names, rows)
+                if "peak_events_per_second" in statement:
+                    return Result(result.column_names, [])
+                return result
+
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: SameSymbolClient())
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            output = Path(folder) / "pilot.json"
+            collect_report("clickhouse", output)
+            report = json.loads(output.read_text())
+
+        self.assertEqual(report["pilot_scope"]["observed_products"], 3)
+        self.assertTrue(report["pilot_scope"]["minimum_product_count_reached"])
 
     def test_empty_dataset_does_not_invent_retention(self):
         class EmptyClient(FakeClient):
@@ -119,3 +180,10 @@ class PilotTests(unittest.TestCase):
         self.assertIsNone(report["compression_ratio"])
         self.assertFalse(report["pilot_scope"]["minimum_dataset_scope_reached"])
         self.assertIsNone(report["storage"]["estimated_retention_days_at_90_percent"])
+        projection = report["capacity_projections"]
+        self.assertIsNone(projection["basis"]["bytes_on_disk_per_product_trading_day"])
+        self.assertIsNone(projection["basis"]["average_aggregate_events_per_second"])
+        self.assertIsNone(projection["targets"][0]["estimated_bytes_per_trading_day"])
+        self.assertIsNone(
+            projection["targets"][0]["estimated_retention_trading_days_at_90_percent"]
+        )

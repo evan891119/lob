@@ -174,7 +174,11 @@ docker compose exec -T collector lob-recorder pilot-report \
 
 未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會分開輸出 ClickHouse `bytes_on_disk`、`compressed_data_bytes`、`uncompressed_data_bytes` 與 `compression_ratio`；ratio 定義為 `uncompressed / compressed`，例如 `4.0` 代表資料壓縮為原始大小的約四分之一。Retention 使用實際 `bytes_on_disk` 的每日平均值估算，不拿壓縮前資料量代替磁碟占用。
 
-`pilot_scope` 會回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。這些 checks 只描述資料庫中可觀測的範圍，不能證明其中任何一天涵蓋完整交易時段；完整時段仍由部署者依 collector start/end 與市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限；空資料集的 ratio 與 retention days 都會是 `null`，不產生虛構估算。
+`pilot_scope` 會按 `security_type + exchange + symbol` 回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。這些 checks 只描述資料庫中可觀測的範圍，不能證明其中任何一天涵蓋完整交易時段；完整時段仍由部署者依 collector start/end 與市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。
+
+`capacity_projections` 會以觀測到的每商品／交易日磁碟量與 aggregate EPS，等比例推估 10、50、100 商品的每日、20 個交易日、250 個交易日用量，以及一份只包含新行情資料的 full-copy backup 大小。若提供實際 filesystem usable bytes，也會分別估算各商品數量在 90% 水位可保留的交易日數。`estimated_conservative_peak_sum_events_per_second` 是把各 stream 個別尖峰相加的保守上界，不是同一秒實測 aggregate peak；projection 不包含 replication、版本歷史、增量鏈、加密或檔案系統額外開銷。`minimum_dataset_scope_reached=false` 時仍會輸出數學估算供診斷，但不得拿來做最終容量決策。
+
+把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限；空資料集的 ratio、projection values 與 retention days 都會是 `null`，不產生虛構估算。
 
 ## 5. 隱私盤點與清除
 
