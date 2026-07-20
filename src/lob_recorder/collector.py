@@ -96,6 +96,7 @@ class Collector:
         self._last_capacity_level = "ok"
         self._capacity: Capacity | None = None
         self._health_status = "created"
+        self._health_lock = threading.Lock()
         self._open_gaps: dict[str, dict] = {}
         self._worker = threading.Thread(target=self._work, name="batch-writer", daemon=True)
 
@@ -352,26 +353,30 @@ class Collector:
     def _write_health(self, status: str) -> None:
         import json
 
-        self.health_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        payload = {
-            "status": status,
-            "updated_at": self._now(),
-            "session_id": self.session_id,
-            "queue_size": self.queue.qsize(),
-            "queue_capacity": self.queue_size,
-            "storage_capacity": None if self._capacity is None else {
-                "bytes_percent": round(self._capacity.bytes_percent, 3),
-                "inode_percent": round(self._capacity.inode_percent, 3),
-                "used_percent": round(self._capacity.used_percent, 3),
-            },
-            "subscriptions_active": self.subscriptions_active,
-            "subscriptions_failed": self.subscriptions_failed,
-            "subscription_results": self.subscription_results,
-            "counters": asdict(self.counters),
-        }
-        temporary = self.health_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
-        temporary.replace(self.health_path)
+        with self._health_lock:
+            self.health_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            payload = {
+                "status": status,
+                "updated_at": self._now(),
+                "session_id": self.session_id,
+                "queue_size": self.queue.qsize(),
+                "queue_capacity": self.queue_size,
+                "storage_capacity": None if self._capacity is None else {
+                    "bytes_percent": round(self._capacity.bytes_percent, 3),
+                    "inode_percent": round(self._capacity.inode_percent, 3),
+                    "used_percent": round(self._capacity.used_percent, 3),
+                },
+                "subscriptions_active": self.subscriptions_active,
+                "subscriptions_failed": self.subscriptions_failed,
+                "subscription_results": self.subscription_results,
+                "counters": asdict(self.counters),
+            }
+            temporary = self.health_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            temporary.replace(self.health_path)
 
     def _session_record(self, status: str, ended: bool = False) -> None:
         record = {

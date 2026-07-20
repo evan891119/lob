@@ -11,7 +11,7 @@ SCRIPT = ROOT / "scripts" / "acceptance-check"
 
 
 class AcceptanceWrapperTests(unittest.TestCase):
-    def _run(self, host_lines: list[str], stat_output: str = "600") -> subprocess.CompletedProcess[str]:
+    def _run(self, host_lines: list[str], stat_output: str = "10001:10001:600") -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             fake_bin = root / "bin"
@@ -21,7 +21,7 @@ class AcceptanceWrapperTests(unittest.TestCase):
             fake_id.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
             fake_stat = fake_bin / "stat"
             fake_stat.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"${FAKE_STAT_OUTPUT:-600}\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"${FAKE_STAT_OUTPUT:-10001:10001:600}\"\n",
                 encoding="utf-8",
             )
             fake_stat.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -59,9 +59,17 @@ class AcceptanceWrapperTests(unittest.TestCase):
         result = self._run([
             "LOB_DATA_ROOT={root}",
             "LOB_CREDENTIAL_FILE={credential}",
-        ], stat_output="644")
+        ], stat_output="10001:10001:644")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("credential file mode must be 0600", result.stderr)
+        self.assertIn("credential file owner/mode must be 10001:10001/0600", result.stderr)
+
+    def test_rejects_credential_owned_by_another_uid(self):
+        result = self._run([
+            "LOB_DATA_ROOT={root}",
+            "LOB_CREDENTIAL_FILE={credential}",
+        ], stat_output="0:0:600")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("credential file owner/mode must be 10001:10001/0600", result.stderr)
 
     def test_0600_credential_reaches_storage_validation(self):
         result = self._run([

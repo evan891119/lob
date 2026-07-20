@@ -4,7 +4,7 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 79 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 81 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
 - Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
@@ -21,10 +21,11 @@
 - 查詢 SQL：同一 symbol/date/time range 實際合併回傳 BidAsk 與 Tick event envelope，並以 event/received/session/sequence 穩定排序。
 - Private runtime inventory：containerized management path 不需 host Python；實際 runtime purge 清除 2 個檔案後保留 mount root inode、Parquet 與行情 tables；一筆 spool purge 留下 closed `manual_spool_purge` gap（affected count 1）。
 - Pilot report unit proof：合併 average/peak EPS，並以實際 parts compressed bytes、觀測交易日與 filesystem usable bytes 產生 90% 水位 retention estimate；空資料集不臆測保留天數。
-- Acceptance report no-leak proof：health 中注入假的 session/account/unknown canary 後輸出不含原文；health 不可讀時只回傳安全 unavailable 狀態。Wrapper 先以 metadata-only 驗證 repo 外 credential 是絕對路徑、非 symlink regular file 且 mode `0600`，再執行 storage check、Compose config 與 read-only ClickHouse/health 查詢；report 另分開判斷 STK/FUT/OPT 是否各自同時具有 BidAsk/Tick rows。最近已結束 session 會用內部參數化 UUID 直接計算兩張 market table rows，但輸出不含 UUID；rows mismatch 與沒有 completed session 都會讓 reconciliation 明確失敗。
+- Acceptance report no-leak proof：health 中注入假的 session/account/unknown canary 後輸出不含原文；health 不可讀時只回傳安全 unavailable 狀態。Wrapper 先以 metadata-only 驗證 repo 外 credential 是絕對路徑、非 symlink regular file 且 owner/mode 精確為 `10001:10001`/`0600`，再執行 storage check、Compose config 與 read-only ClickHouse/health 查詢；錯誤 owner 或 mode 均 fail closed，report 另分開判斷 STK/FUT/OPT 是否各自同時具有 BidAsk/Tick rows。最近已結束 session 會用內部參數化 UUID 直接計算兩張 market table rows，但輸出不含 UUID；rows mismatch 與沒有 completed session 都會讓 reconciliation 明確失敗。
 - Storage identity wrapper proof：只接受 ext4/XFS 與 exact mount target，要求 filesystem UUID 對應 `/etc/fstab` 的 `UUID=` entry；成功輸出只有 filesystem 類型、容量 bytes 與布林結果，device/UUID canary 不會出現在 stdout/stderr。這不取代實際 reboot 後重跑。
 - Database outage drill proof：wrapper 沒有明確 confirmation 或 duration 超過 30–900 秒時會在呼叫 Docker 前拒絕；執行階段以 trap 保證失敗/interrupt 仍嘗試啟動 ClickHouse。Verifier 只比較 allowlisted acceptance reports，要求同一 simulation session、spooled/replayed delta、零新增 drop 與新增且 closed 的 database gap；輸出不含輸入中的 private canary。這些 unit proof 不冒充目標 Linux 實際 outage。
 - Shioaji reconnect proof：event `13` callback 只 signal main thread，main thread 才重新訂閱已解析商品的全部 configured streams；逐 stream 結果仍使用安全 category，成功後才記錄 reconnect/close gap，全部失敗則 exponential retry。Network drill 只 disconnect collector 的 Compose outbound network，保留 ClickHouse internal network，並以 exit trap 恢復；wrapper confirmation/bounds 與 verifier 的 same-session/reconnect/subscription/closed-gap/no-drop/no-leak checks 有 unit proof，但尚未冒充目標 Linux 實際 network drill。
+- Health atomic-write concurrency proof：main/worker 共用單一 lock 保護同一 `health.tmp` 的 write/replace；8 threads 各寫 50 次後沒有 exception，最終 JSON 仍可解析，避免並行 replace 偶發遺失 temporary file。
 - Host reboot proof tooling：prepare/verify wrapper 都需要明確 confirmation；raw boot identifier 只以 `10001:10001`/`0600` 暫存在可 purge 的 private-runtime，report 不含該值。Verifier 要求 boot 改變、collector session 改變、simulation、最早歷史 event 保留、LOB/Tick rows 不減、health/subscriptions/storage/no-open-gap 全通過；same boot/session 與 private canary cases 有 unit proof，但尚未冒充目標 Linux 實際 reboot。
 
 ## 部署者確認的外部證據
@@ -36,7 +37,7 @@
 
 ## 必須在目標 Linux/外部環境完成
 
-- 目標 filesystem 的實際容量、UUID/`fstab`、host credential owner 與重新開機後掛載驗證。
+- 目標 filesystem 的實際容量、UUID/`fstab`、新版 exact host credential owner/mode 與重新開機後掛載驗證。
 - OPT 交易時段訂閱；STK＋FUT 兩商品 live gate 已由部署者確認。
 - 目標 Linux 上的長時間 database outage、ClickHouse/host restart、網路斷線與 replay 測試。
 - 至少一完整交易日、建議五日的 3–5 商品 pilot。

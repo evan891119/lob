@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 import json
+import threading
 from pathlib import Path
 
 from lob_recorder.collector import Collector
@@ -169,6 +170,33 @@ class CollectorTests(unittest.TestCase):
             health = json.loads((root / "health.json").read_text())
             self.assertEqual(health["status"], "stopped")
             self.assertIn("queue_high_water", health["counters"])
+
+    def test_concurrent_health_writes_share_one_atomic_replace_lock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            collector = Collector(
+                JsonlSink(root / "events.jsonl"), root / "spool",
+                root / "log/collector.log", root / "health.json",
+            )
+            barrier = threading.Barrier(8)
+            errors = []
+
+            def writer():
+                try:
+                    barrier.wait()
+                    for _ in range(50):
+                        collector._write_health("running")
+                except Exception as exc:
+                    errors.append(type(exc).__name__)
+
+            threads = [threading.Thread(target=writer) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(json.loads((root / "health.json").read_text())["status"], "running")
 
     def test_session_persists_public_subscription_results(self):
         with tempfile.TemporaryDirectory() as folder:
