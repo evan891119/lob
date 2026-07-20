@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -eq 0 || { echo "run with sudo" >&2; exit 1; }
+test "$#" -eq 4 \
+  || { echo "usage: sudo scripts/host-reboot-check prepare|verify ABSOLUTE_DATA_ROOT HOST_ENV_FILE CONFIRMATION" >&2; exit 2; }
+
+action="$1"
+data_root="$2"
+host_env="$3"
+confirmation="$4"
+case "$action:$confirmation" in
+  prepare:--confirm-reboot-preparation|verify:--confirm-after-reboot) ;;
+  prepare:*) echo "explicit reboot preparation confirmation is required" >&2; exit 1 ;;
+  verify:*) echo "explicit after-reboot confirmation is required" >&2; exit 1 ;;
+  *) echo "action must be prepare or verify" >&2; exit 1 ;;
+esac
+test "${data_root#/}" != "$data_root" && test "$data_root" != "/" \
+  || { echo "unsafe data root" >&2; exit 1; }
+test -f "$host_env" || { echo "host config is unavailable" >&2; exit 1; }
+configured_root="$(sed -n 's/^LOB_DATA_ROOT=//p' "$host_env")"
+test "$configured_root" = "$data_root" \
+  || { echo "data root does not match host config" >&2; exit 1; }
+test "$(sed -n 's/^LOB_MODE=//p' "$host_env")" = "live" \
+  || { echo "reboot check requires LOB_MODE=live" >&2; exit 1; }
+
+dc() {
+  docker compose --env-file "$host_env" "$@"
+}
+
+scripts/storage-identity-check "$data_root" >/dev/null
+scripts/acceptance-check "$data_root" "$host_env" >/dev/null
+
+state_dir="$data_root/private-runtime/reboot-check"
+state_file="$state_dir/boot-id"
+before="/var/lib/lob/parquet/reboot-before.json"
+after="/var/lib/lob/parquet/reboot-after.json"
+evidence="/var/lib/lob/parquet/reboot-report.json"
+current_boot="$(sed -n '1p' /proc/sys/kernel/random/boot_id)"
+test -n "$current_boot" || { echo "host boot identifier is unavailable" >&2; exit 1; }
+
+if test "$action" = "prepare"; then
+  test ! -L "$state_dir" && test ! -L "$state_file" \
+    || { echo "reboot state path must not be a symlink" >&2; exit 1; }
+  test ! -e "$state_file" \
+    || { echo "reboot state is already prepared" >&2; exit 1; }
+  dc exec -T collector cp /var/lib/lob/parquet/acceptance-report.json "$before"
+  mkdir -p "$state_dir"
+  umask 077
+  printf '%s\n' "$current_boot" > "$state_file"
+  chown -R 10001:10001 "$state_dir"
+  chmod 0700 "$state_dir"
+  chmod 0600 "$state_file"
+  echo "reboot check prepared; reboot is still a separate administrator action"
+  exit 0
+fi
+
+test -f "$state_file" && test ! -L "$state_file" \
+  || { echo "prepared reboot state is unavailable" >&2; exit 1; }
+test "$(stat -c '%u:%g:%a' "$state_file")" = "10001:10001:600" \
+  || { echo "prepared reboot state metadata is invalid" >&2; exit 1; }
+previous_boot="$(sed -n '1p' "$state_file")"
+test -n "$previous_boot" || { echo "prepared reboot state is invalid" >&2; exit 1; }
+dc exec -T collector cp /var/lib/lob/parquet/acceptance-report.json "$after"
+
+reboot_flag=""
+if test "$current_boot" != "$previous_boot"; then
+  reboot_flag="--reboot-observed"
+fi
+if test -n "$reboot_flag"; then
+  dc exec -T collector lob-recorder reboot-verify \
+    --before "$before" --after "$after" --reboot-observed --output "$evidence"
+else
+  dc exec -T collector lob-recorder reboot-verify \
+    --before "$before" --after "$after" --output "$evidence"
+fi
+
+rm -f "$state_file"
+rmdir "$state_dir" 2>/dev/null || true
+echo "reboot persistence check complete; temporary boot state removed"

@@ -24,6 +24,7 @@ from lob_recorder.pilot import collect_report
 from lob_recorder.privacy import correlation_id
 from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
 from lob_recorder.quality import inspect, inspect_parquet
+from lob_recorder.reboot import build_reboot_evidence, write_reboot_evidence
 from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
 from lob_recorder.sources.fixture import FixtureSource
 from lob_recorder.storage import STORAGE_MARKER, ensure_layout, usable_bytes, validate_storage
@@ -314,6 +315,17 @@ def command_network_outage_verify(args) -> None:
     print("network outage verification complete")
 
 
+def command_reboot_verify(args) -> None:
+    try:
+        report = build_reboot_evidence(args.before, args.after, args.reboot_observed)
+        write_reboot_evidence(report, args.output)
+    except Exception as exc:
+        raise SystemExit(f"reboot verification failed: {type(exc).__name__}") from None
+    if not report["checks"]["reboot_persistence_verified"]:
+        raise SystemExit("reboot verification incomplete")
+    print("reboot verification complete")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="lob-recorder")
     sub = result.add_subparsers(dest="command", required=True)
@@ -334,6 +346,7 @@ def parser() -> argparse.ArgumentParser:
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)
     network_outage = sub.add_parser("network-outage-verify"); network_outage.add_argument("--before", required=True); network_outage.add_argument("--after", required=True); network_outage.add_argument("--outage-seconds", required=True, type=int); network_outage.add_argument("--output", required=True); network_outage.set_defaults(func=command_network_outage_verify)
+    reboot = sub.add_parser("reboot-verify"); reboot.add_argument("--before", required=True); reboot.add_argument("--after", required=True); reboot.add_argument("--reboot-observed", action="store_true"); reboot.add_argument("--output", required=True); reboot.set_defaults(func=command_reboot_verify)
     return result
 
 

@@ -126,6 +126,28 @@ sudo cat /mnt/lob-data/parquet/network-outage-report.json
 
 `network_outage_verified=true` 要求同一 simulation collector session、reconnect counter 增加、subscriptions 數量恢復且未惡化、恢復後重新收到行情、沒有新增 drop，以及新的 `connection_down` gap 已關閉。若 Shioaji 沒有偵測到斷線、非交易時段沒有新行情或訂閱未恢復，report 會保留失敗 checks；工具不會把單純重新接上 Docker network 冒充 Shioaji 恢復成功。
 
+### Host reboot persistence check
+
+這是刻意分成兩階段的外部驗收；script 不會自行執行 reboot。`prepare` 先重跑 storage identity 與 acceptance checks，將安全的 before report 寫到 Parquet，並把原始 Linux boot identifier 以 `10001:10001`、mode `0600` 暫存在 `private-runtime/reboot-check/`。原始值不會輸出或進入 report，且可由 `privacy-purge --runtime` 清除；重複 prepare 會拒絕覆寫既有 baseline。
+
+```bash
+sudo scripts/host-reboot-check prepare \
+  /mnt/lob-data /etc/shioaji-lob-recorder/host.env \
+  --confirm-reboot-preparation
+
+# reboot 是獨立的管理者操作；確認沒有其他工作後才執行
+sudo reboot
+
+# 主機回來、Docker services 恢復後
+cd /path/to/repository
+sudo scripts/host-reboot-check verify \
+  /mnt/lob-data /etc/shioaji-lob-recorder/host.env \
+  --confirm-after-reboot
+sudo cat /mnt/lob-data/parquet/reboot-report.json
+```
+
+`verify` 會再次要求 filesystem UUID/`fstab` match、mount/layout、credential metadata、Compose config、ClickHouse 與 collector 可用，並確認 boot identifier 已改變；最後只輸出 row deltas 與布林 checks。`reboot_persistence_verified=true` 另要求 collector session 已重建、前後皆為 simulation、歷史最早 event 未改變、LOB/Tick rows 未減少、subscriptions/health/storage 正常且沒有 open gap。成功後暫存 boot identifier 會立即刪除；若未 reboot 或任何 persistence check 失敗，狀態會保留以便真正 reboot 後重試，不會冒充成功。
+
 ## 4. 查詢、匯出與品質
 
 ```bash
