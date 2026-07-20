@@ -27,11 +27,13 @@
 
 - 目標 Linux 使用修正版 image 後，Shioaji simulation collector 已持續收到並寫入單一股票行情。此證據由部署者確認；本文件不保存該主機、帳戶、credential、原始 Shioaji log 或私人 runtime 內容。
 - 目標 Linux 的 `security_type = 'FUT'` ClickHouse 查詢連續兩次顯示 Tick rows `138 → 141`、BidAsk rows `746 → 779`，確認大台期貨兩種 callback 已持續寫入。此證據不代表完整交易時段、多商品、選擇權、重啟或 outage 驗收。
+- Privacy-safe acceptance report 顯示 health fresh/running、simulation、`2330` 與 `TXFR1→TXFH6` 四個 subscriptions active/零 failed，STK/FUT 各自 BidAsk/Tick rows 皆存在；LOB/Tick 總列數為 `79,657/18,576`，當下 drop/spool/replay/reconnect/clock anomaly 均 `0`，三個既有 gap intervals 全部 closed，storage used `8.12%`。Wrapper 成功亦證明當下 mount/layout/marker、Compose config 與 credential path/type/`0600` metadata 通過。
+- 新 collector session 起於 `13:16`，database 仍含 `10:53` 起的 rows，證明 collector rebuild/recreate 未破壞既有 ClickHouse 歷史資料；不擴大解讀為 host reboot 或 ClickHouse restore 驗收。
 
 ## 必須在目標 Linux/外部環境完成
 
-- 目標 20TB filesystem 的真實 mount/UUID、實際 owner/mode 與重新開機後掛載驗證。
-- OPT 與多商品交易時段訂閱；單一股票與大台期貨 live gate 已由部署者確認。
-- 目標 Linux 上的長時間 database outage、container restart、網路斷線與多商品 replay 測試。
+- 目標 filesystem 的實際容量、UUID/`fstab`、host credential owner 與重新開機後掛載驗證。
+- OPT 交易時段訂閱；STK＋FUT 兩商品 live gate 已由部署者確認。
+- 目標 Linux 上的長時間 database outage、ClickHouse/host restart、網路斷線與 replay 測試。
 - 至少一完整交易日、建議五日的 3–5 商品 pilot。
 - 依實際 filesystem 可用 bytes 產生 20TB retention/backup 報告。
