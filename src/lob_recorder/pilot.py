@@ -49,7 +49,10 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         ORDER BY table, symbol, trading_date
     """)
     parts = client.query("""
-        SELECT table, sum(rows) AS rows, sum(bytes_on_disk) AS compressed_bytes
+        SELECT table, sum(rows) AS rows,
+               sum(bytes_on_disk) AS bytes_on_disk,
+               sum(data_compressed_bytes) AS compressed_data_bytes,
+               sum(data_uncompressed_bytes) AS uncompressed_data_bytes
         FROM system.parts
         WHERE active AND database = 'lob' AND table IN ('lob_events', 'tick_events')
         GROUP BY table ORDER BY table
@@ -79,9 +82,28 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
             (row["table"], row["symbol"], str(row["trading_date"])), 0
         )
     part_rows = _rows(parts)
-    total_bytes = sum(int(row["compressed_bytes"]) for row in part_rows)
+    for row in part_rows:
+        compressed = int(row["compressed_data_bytes"])
+        uncompressed = int(row["uncompressed_data_bytes"])
+        row["compression_ratio"] = round(uncompressed / compressed, 3) if compressed else None
+    total_bytes_on_disk = sum(int(row["bytes_on_disk"]) for row in part_rows)
+    total_compressed_data_bytes = sum(int(row["compressed_data_bytes"]) for row in part_rows)
+    total_uncompressed_data_bytes = sum(int(row["uncompressed_data_bytes"]) for row in part_rows)
+    compression_ratio = (
+        round(total_uncompressed_data_bytes / total_compressed_data_bytes, 3)
+        if total_compressed_data_bytes
+        else None
+    )
     trading_days = len({str(row["trading_date"]) for row in market_rows})
-    average_bytes_per_day = round(total_bytes / trading_days) if trading_days else 0
+    observed_symbols = len({str(row["symbol"]) for row in market_rows})
+    average_bytes_per_day = round(total_bytes_on_disk / trading_days) if trading_days else 0
+    pilot_scope = {
+        "observed_symbols": observed_symbols,
+        "observed_trading_days": trading_days,
+        "minimum_product_count_reached": observed_symbols >= 3,
+        "minimum_dataset_scope_reached": observed_symbols >= 3 and trading_days >= 1,
+        "recommended_five_day_scope_reached": observed_symbols >= 3 and trading_days >= 5,
+    }
     storage = None
     if storage_total is not None:
         stop_bytes = int(storage_total * 0.90)
@@ -90,7 +112,7 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
             "warning_80_bytes": int(storage_total * 0.80),
             "stop_90_bytes": stop_bytes,
             "observed_trading_days": trading_days,
-            "average_compressed_bytes_per_day": average_bytes_per_day,
+            "average_bytes_on_disk_per_day": average_bytes_per_day,
             "estimated_retention_days_at_90_percent": (
                 stop_bytes // average_bytes_per_day if average_bytes_per_day else None
             ),
@@ -101,7 +123,11 @@ def collect_report(host: str, output: str | Path, storage_total: int | None = No
         "market_parts": part_rows,
         "capture_sessions": _rows(sessions),
         "capture_gaps": _rows(gaps),
-        "compressed_bytes": total_bytes,
+        "pilot_scope": pilot_scope,
+        "bytes_on_disk": total_bytes_on_disk,
+        "compressed_data_bytes": total_compressed_data_bytes,
+        "uncompressed_data_bytes": total_uncompressed_data_bytes,
+        "compression_ratio": compression_ratio,
         "storage": storage,
     }
     target = Path(output)

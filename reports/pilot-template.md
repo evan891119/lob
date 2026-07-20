@@ -18,9 +18,9 @@
 | batch insert latency (ms) | | | |
 | queue usage (%) | | | |
 
-| 商品 | lob rows/day | tick rows/day | compressed bytes/day |
-| --- | ---: | ---: | ---: |
-| | | | |
+| 商品 | lob rows/day | tick rows/day | bytes on disk/day | compression ratio |
+| --- | ---: | ---: | ---: | ---: |
+| | | | | |
 
 ## 完整性
 
@@ -32,7 +32,7 @@
 
 ## 20TB 磁碟估算
 
-- `pilot-report.json` 會提供觀測交易日數、平均壓縮 bytes/day 與到 90% 水位的估計保留天數；資料集為空時保留天數必須是 `null`，不得臆測。
+- `pilot-report.json` 會提供觀測商品／交易日數、平均 `bytes_on_disk`/day、壓縮前後 bytes、compression ratio 與到 90% 水位的估計保留天數；資料集為空時 ratio 與保留天數必須是 `null`，不得臆測。
 - filesystem 實際可用容量：
 - 80% warning bytes：`實際可用容量 × 0.80`
 - 90% stop bytes：`實際可用容量 × 0.90`

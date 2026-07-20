@@ -172,7 +172,9 @@ docker compose exec -T collector lob-recorder pilot-report \
   --host clickhouse --output /var/lib/lob/parquet/pilot-report.json
 ```
 
-未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會輸出 average/peak EPS、觀測交易日、平均 compressed bytes/day，以及到 90% 水位的估計 retention days；空資料集不會產生虛構估算。Pilot 至少需 3–5 個不同活躍度商品與一個完整交易日；建議五日。把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限。
+未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會分開輸出 ClickHouse `bytes_on_disk`、`compressed_data_bytes`、`uncompressed_data_bytes` 與 `compression_ratio`；ratio 定義為 `uncompressed / compressed`，例如 `4.0` 代表資料壓縮為原始大小的約四分之一。Retention 使用實際 `bytes_on_disk` 的每日平均值估算，不拿壓縮前資料量代替磁碟占用。
+
+`pilot_scope` 會回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。這些 checks 只描述資料庫中可觀測的範圍，不能證明其中任何一天涵蓋完整交易時段；完整時段仍由部署者依 collector start/end 與市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限；空資料集的 ratio 與 retention days 都會是 `null`，不產生虛構估算。
 
 ## 5. 隱私盤點與清除
 
