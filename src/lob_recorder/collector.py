@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable
 
 from lob_recorder.models import TAIPEI, normalize
 from lob_recorder.privacy import JsonLogger, correlation_id
+from lob_recorder.sinks import PartialWriteError
 from lob_recorder.spool import DurableSpool
 from lob_recorder.storage import Capacity, capacity
 
@@ -294,6 +295,21 @@ class Collector:
             # A recovered direct write must not close the gap before the older
             # open-gap audit envelope and market spool have been replayed.
             self._replay_spools()
+        except PartialWriteError as exc:
+            elapsed_ms = (time.monotonic() - started) * 1_000
+            self.counters.written += exc.written_count
+            if exc.written_count:
+                self.counters.batch_count += 1
+                self.counters.batch_insert_ms_total += elapsed_ms
+                self.counters.batch_insert_ms_max = max(self.counters.batch_insert_ms_max, elapsed_ms)
+            self.counters.spooled += self.spool.append(exc.pending_records)
+            cause = exc.__cause__ or exc
+            cid = correlation_id(cause)
+            self.logger.write(
+                "database_write_failed", level="warning", category=type(cause).__name__,
+                correlation_id=cid, count=len(exc.pending_records),
+            )
+            self._begin_gap("database_failure", len(exc.pending_records), cid)
         except Exception as exc:
             self.counters.spooled += self.spool.append(batch)
             cid = correlation_id(exc)
@@ -307,7 +323,8 @@ class Collector:
             self.logger.write("audit_replay_failed", level="warning", category=type(exc).__name__, correlation_id=correlation_id(exc))
             return
         try:
-            replayed = self.spool.replay(self.sink.write, self.batch_size)
+            replay = getattr(self.sink, "replay", self.sink.write)
+            replayed = self.spool.replay(replay, self.batch_size)
             if replayed:
                 self.counters.replayed += replayed
                 self.logger.write("spool_replayed", count=replayed, category="market")

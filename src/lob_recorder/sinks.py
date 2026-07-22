@@ -9,6 +9,15 @@ from typing import Iterable
 from uuid import UUID
 
 
+class PartialWriteError(RuntimeError):
+    """A batch write failed after some stream groups were confirmed committed."""
+
+    def __init__(self, pending_records: list[dict], written_count: int):
+        super().__init__("market batch was only partially written")
+        self.pending_records = pending_records
+        self.written_count = written_count
+
+
 class JsonlSink:
     """Fixture/testing sink containing normalized public market events only."""
 
@@ -73,10 +82,78 @@ class ClickHouseSink:
 
     def write(self, records: list[dict]) -> None:
         with self.lock:
-            for stream, table, columns in (("bidask", "lob_events", self.LOB_COLUMNS), ("tick", "tick_events", self.TICK_COLUMNS)):
+            groups = (
+                ("bidask", "lob_events", self.LOB_COLUMNS),
+                ("tick", "tick_events", self.TICK_COLUMNS),
+            )
+            written_count = 0
+            for index, (stream, table, columns) in enumerate(groups):
                 selected = [record for record in records if record["stream"] == stream]
                 if selected:
-                    self.client.insert(table, [[self._value(c, r.get(c)) for c in columns] for r in selected], column_names=columns)
+                    try:
+                        self._insert(table, columns, selected)
+                    except Exception as exc:
+                        pending_streams = {name for name, _table, _columns in groups[index:]}
+                        pending = [record for record in records if record["stream"] in pending_streams]
+                        raise PartialWriteError(pending, written_count) from exc
+                    written_count += len(selected)
+
+    def replay(self, records: list[dict]) -> None:
+        """Idempotently replay market events after an uncertain database write."""
+        with self.lock:
+            groups = (
+                ("bidask", "lob_events", self.LOB_COLUMNS),
+                ("tick", "tick_events", self.TICK_COLUMNS),
+            )
+            for stream, table, columns in groups:
+                selected = [record for record in records if record["stream"] == stream]
+                missing = self._missing_records(table, selected)
+                if missing:
+                    self._insert(table, columns, missing)
+
+    def _insert(self, table: str, columns: list[str], records: list[dict]) -> None:
+        self.client.insert(
+            table,
+            [[self._value(column, record.get(column)) for column in columns] for record in records],
+            column_names=columns,
+        )
+
+    def _missing_records(self, table: str, records: list[dict]) -> list[dict]:
+        if not records:
+            return []
+        by_partition: dict[tuple[str, str], list[int]] = {}
+        for record in records:
+            session_id = str(UUID(str(record["session_id"])))
+            trading_date = str(record["trading_date"])
+            by_partition.setdefault((session_id, trading_date), []).append(int(record["sequence_no"]))
+
+        existing: set[tuple[str, int]] = set()
+        for (session_id, trading_date), sequences in by_partition.items():
+            result = self.client.query(
+                f"""
+                SELECT session_id, sequence_no
+                FROM {table}
+                WHERE session_id = {{session_id:UUID}}
+                  AND trading_date = {{trading_date:Date}}
+                  AND sequence_no BETWEEN {{minimum:UInt64}} AND {{maximum:UInt64}}
+                """,
+                parameters={
+                    "session_id": session_id,
+                    "trading_date": trading_date,
+                    "minimum": min(sequences),
+                    "maximum": max(sequences),
+                },
+            )
+            existing.update((str(row[0]), int(row[1])) for row in result.result_rows)
+
+        missing: list[dict] = []
+        seen = set(existing)
+        for record in records:
+            identity = (str(UUID(str(record["session_id"]))), int(record["sequence_no"]))
+            if identity not in seen:
+                missing.append(record)
+                seen.add(identity)
+        return missing
 
     def session(self, record: dict) -> None:
         columns = list(record)

@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 from lob_recorder.collector import Collector, ProcessResources
-from lob_recorder.sinks import JsonlSink, read_jsonl
+from lob_recorder.sinks import JsonlSink, PartialWriteError, read_jsonl
 from lob_recorder.storage import Capacity
 
 
@@ -59,6 +59,22 @@ class AuditFirstSink(RecoveringSink):
         super().gap(record)
 
 
+class PartialRecoveringSink(RecoveringSink):
+    def __init__(self):
+        super().__init__()
+        self.fail_once = True
+
+    def write(self, records):
+        if self.fail_once:
+            self.fail_once = False
+            self.events.extend(records[:1])
+            raise PartialWriteError(records[1:], 1) from ConnectionError("tick insert failed")
+        super().write(records)
+
+    def replay(self, records):
+        super().write(records)
+
+
 class CollectorTests(unittest.TestCase):
     def test_fixture_batch_write(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -75,6 +91,28 @@ class CollectorTests(unittest.TestCase):
             collector.start(); collector.emit(EVENT); collector.stop()
             self.assertEqual(collector.counters.spooled, 1)
             self.assertNotIn("upstream text", (root / "log/collector.log").read_text())
+
+    def test_partial_write_counts_confirmed_records_and_spools_only_pending_tail(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            sink = PartialRecoveringSink()
+            collector = Collector(
+                sink, root / "spool", root / "log/collector.log", root / "health.json",
+                batch_size=2,
+            )
+            records = [
+                {"stream": "bidask", "sequence_no": 1},
+                {"stream": "tick", "sequence_no": 2},
+            ]
+
+            collector._flush(records)
+
+            self.assertEqual(collector.counters.written, 1)
+            self.assertEqual(collector.counters.spooled, 1)
+            self.assertEqual([row["sequence_no"] for row in collector.spool.records()], [2])
+            collector._replay_spools()
+            self.assertEqual(collector.counters.replayed, 1)
+            self.assertEqual([row["sequence_no"] for row in sink.events], [1, 2])
 
     def test_outage_replays_market_and_audit_without_restart(self):
         with tempfile.TemporaryDirectory() as folder:
