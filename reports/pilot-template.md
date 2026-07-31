@@ -40,6 +40,10 @@
 - spool / replay：
 - capture gaps：
 - quality checks（duplicate / ordering / crossed book / negative volume）：
+- `all_identities_have_both_streams`：
+- `structural_issues_zero`：
+- `complete_scope_quality_passed`：
+- `time_gaps` 的市場時段判讀：
 
 ## 20TB 磁碟估算
 

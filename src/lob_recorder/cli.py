@@ -23,7 +23,7 @@ from lob_recorder.outage import (
 from lob_recorder.pilot import collect_report
 from lob_recorder.privacy import correlation_id
 from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
-from lob_recorder.quality import inspect, inspect_parquet
+from lob_recorder.quality import inspect, inspect_parquet, write_quality_report
 from lob_recorder.reboot import build_reboot_evidence, write_reboot_evidence
 from lob_recorder.resource_evidence import parse_samples, write_resource_report
 from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
@@ -275,7 +275,13 @@ def command_quality(args) -> None:
             sequence_scope_complete=args.complete_sequence_scope,
         )
     )
-    print(json.dumps(result, sort_keys=True))
+    if args.output:
+        write_quality_report(result, args.output)
+        print("quality report complete")
+    else:
+        print(json.dumps(result, sort_keys=True))
+    if args.require_complete_clean and not result["complete_scope_quality_passed"]:
+        raise SystemExit("complete-scope quality verification failed")
 
 
 def command_export(args) -> None:
@@ -385,7 +391,7 @@ def parser() -> argparse.ArgumentParser:
     purge.add_argument("--database-metadata", action="store_true", help="handled by scripts/privacy-purge using ClickHouse exec")
     purge.add_argument("--runtime-root", required=True); purge.add_argument("--spool-root", required=True); purge.add_argument("--credential-file", required=True)
     purge.add_argument("--dry-run", action="store_true"); purge.add_argument("--yes", action="store_true"); purge.set_defaults(func=command_privacy_purge)
-    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.add_argument("--complete-sequence-scope", action="store_true", help="assert that input contains every market event for each included session interval"); quality.set_defaults(func=command_quality)
+    quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.add_argument("--complete-sequence-scope", action="store_true", help="assert that input contains every market event for each included session interval"); quality.add_argument("--output"); quality.add_argument("--require-complete-clean", action="store_true", help="exit nonzero unless complete scope has both streams per market identity and zero structural issues"); quality.set_defaults(func=command_quality)
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--security-type", choices=("STK", "FUT", "OPT")); export.add_argument("--exchange"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.add_argument("--start-date", type=date.fromisoformat); pilot.add_argument("--end-date", type=date.fromisoformat); pilot.set_defaults(func=command_pilot_report)
     resources = sub.add_parser("resource-report"); resources.add_argument("--output", required=True); resources.set_defaults(func=command_resource_report)

@@ -4,7 +4,7 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 115 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 120 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
 - Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
@@ -17,7 +17,7 @@
 - Fixture ClickHouse insert：BidAsk 與 Tick 各至少一列。
 - 短時間 database outage：同一 collector process 收到 362 筆，正常寫入 326 筆、spool/replay 36/36、drop 0；唯一 database gap 已關閉。
 - Audit ordering：open gap 先於 market replay，closed gap 最後寫入；恢復後 latest view 不殘留錯誤的 open gap。
-- Zstd Parquet：全商品日匯出 362 列；DuckDB 能以 `union_by_name` 查詢；明確標示完整 sequence scope 後 7 類 quality counters 全為 0。部分商品／stream scope 會輸出 `sequence_gaps=null`，不把其他商品的合法 sequence 誤報為缺號；duplicate identity 使用 session＋sequence，能抓到跨 stream 重複。
+- Zstd Parquet：全商品日匯出 362 列；DuckDB 能以 `union_by_name` 查詢；明確標示完整 sequence scope 後 quality counters 全為 0。部分商品／stream scope 會輸出 `sequence_gaps=null`，不把其他商品的合法 sequence 誤報為缺號；duplicate identity 使用 session＋sequence，能抓到跨 stream 重複。排序／時間 gap 改以 session＋完整 market identity＋stream 分組，同代碼 STK/FUT 不會互相造成假 out-of-order；缺 security type/exchange/symbol、未知 stream、naive/aware timestamp 混用或任一 identity 缺 BidAsk/Tick 都會讓 complete-scope check fail closed。CLI 可先原子保存 report，再依 `complete_scope_quality_passed` 回傳非零狀態。
 - 查詢 SQL：同一 security type/exchange/symbol/date/time range 實際合併回傳 BidAsk 與 Tick event envelope，並以 event/received/session/sequence 穩定排序。Parquet exporter 以完整 market identity 查詢及建立 Hive partitions，同代碼跨 STK/FUT/OPT 或 exchange 不會共用輸出檔。
 - Private runtime inventory：containerized management path 不需 host Python；實際 runtime purge 清除 2 個檔案後保留 mount root inode、Parquet 與行情 tables；一筆 spool purge 留下 closed `manual_spool_purge` gap（affected count 1）。
 - Pilot report unit proof：inclusive start/end date 以 ClickHouse typed parameters 限制 market/peak/session/gap，缺單側、倒置範圍及非正容量 fail closed；按 `security_type + exchange + symbol` 合併 average/peak EPS。無日期時使用 exact active parts；日期範圍則按每 table scoped/active rows 比例估算 `bytes_on_disk` 與壓縮前後 data bytes，report 明列 measurement method 並保留 global exact totals。Retention/projection 使用 scoped bytes，另輸出最低／建議 scope，以及明列 20／250 交易日、線性商品數、保守 peak-sum 與單一 full-copy backup 假設的 10／50／100 商品 projections；空資料集衍生值維持 `null`。新版 checks 會偵測成功訂閱但完全沒有 rows 的商品，並要求每個訂閱或觀測商品／日期都有 BidAsk/Tick、scoped sessions 全為 simulation/已結束/零 drop、零 open gap且 storage projection 可用，否則 `pilot_data_integrity_ready=false`；報告移除不必要的 session UUID 與 subscription descriptors，完整交易時段仍固定要求部署者確認。`scripts/pilot-check` 對日期格式與順序 fail closed，先重跑 acceptance 再產生 scoped report。

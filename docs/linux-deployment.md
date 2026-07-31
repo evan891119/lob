@@ -201,7 +201,9 @@ docker compose --env-file deploy/host.env exec -T collector lob-recorder quality
 # 只有當 pattern 包含該日期所有商品與兩種 stream，才可宣告 sequence scope 完整
 docker compose --env-file deploy/host.env exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/security_type=*/exchange=*/symbol=*/trading_date=2026-01-02/*.parquet' \
-  --complete-sequence-scope
+  --complete-sequence-scope \
+  --output /var/lib/lob/parquet/quality-2026-01-02.json \
+  --require-complete-clean
 
 # 推薦入口：先重跑唯讀 acceptance，再產生 scoped pilot report
 sudo scripts/pilot-check \
@@ -212,6 +214,8 @@ sudo cat /mnt/lob-data/parquet/pilot-resource-report.json
 ```
 
 `sequence_no` 是 collector session 內跨商品、跨 BidAsk/Tick 共用的流水號。單一商品、單一 stream 或其他部分匯出不能判斷缺號；quality report 會 fail closed 輸出 `sequence_scope_complete=false` 與 `sequence_gaps=null`。只有 pattern 確實包含所選 session interval 的所有行情事件時，才可加 `--complete-sequence-scope`；錯把部分資料宣告完整會製造假 sequence gap。Duplicate identity 使用 `session_id + sequence_no`，相同 sequence 即使落在不同 stream 也會被偵測。
+
+排序與時間 gap 必須按 `session_id + security_type + exchange + symbol + stream` 分組；同代碼存在不同市場時不得互相混合。完整 scope report 另輸出 records、完整 market identity 數、每個 identity 是否同時有 BidAsk/Tick、結構性 issues 是否全為零，以及 `complete_scope_quality_passed`。`--require-complete-clean` 會先原子寫入 report，再在缺 stream、duplicate、out-of-order、sequence gap、invalid timestamp/identity/stream、負數量或 crossed book 時以非零狀態退出。`time_gaps` 保留為需依市場時段判讀的資訊，不自動讓 structural check 失敗，避免把休市或低流動性冒充資料遺失。
 
 ClickHouse 會分開寫入 `lob_events` 與 `tick_events`。若前一張表已成功而後一張表失敗，collector 只把尚未確認成功的 stream 放入 market spool；replay 另以 `session_id + sequence_no` 查詢目標 table，跳過可能已由不確定 insert 提交的事件，只補缺少資料。這同時涵蓋連線在 server commit 後才中斷，以及 replay 寫入後、spool 檔案刪除前程序中止的情況。升級不會自動刪除舊 session 已存在的 duplicate；既有資料仍應先以 quality report 確認，再另行安排備份與受控清理。
 
