@@ -31,6 +31,86 @@ def _token(value: Any) -> str:
     return text
 
 
+def _timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).isoformat(sep=" ")
+    except (TypeError, ValueError):
+        return None
+
+
+def _stream_activity_summary(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    activity = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        security_type = _token(row.get("security_type", ""))
+        exchange = _token(row.get("exchange", ""))
+        symbol = _token(row.get("symbol", ""))
+        stream = _token(row.get("stream", ""))
+        if "[REDACTED]" in {security_type, exchange, symbol, stream}:
+            continue
+        if stream not in {"bidask", "tick"}:
+            continue
+        try:
+            received = int(row.get("received", row.get("rows", 0)))
+        except (TypeError, ValueError):
+            continue
+        activity.append({
+            "security_type": security_type,
+            "exchange": exchange,
+            "symbol": symbol,
+            "stream": stream,
+            "received": max(0, received),
+            "first_received_at": _timestamp(
+                row.get("first_received_at", row.get("first_event_ts"))
+            ),
+            "last_received_at": _timestamp(
+                row.get("last_received_at", row.get("last_event_ts"))
+            ),
+        })
+    return sorted(
+        activity,
+        key=lambda row: (
+            row["security_type"], row["exchange"], row["symbol"], row["stream"]
+        ),
+    )
+
+
+def _expected_streams(results: list[str]) -> set[tuple[str, str, str, str]]:
+    expected = set()
+    for raw in results:
+        token = _token(raw)
+        if token == "[REDACTED]":
+            continue
+        parts = token.split(":")
+        if len(parts) != 6 or parts[5] not in {"subscribed", "resubscribed"}:
+            continue
+        security_type, exchange, _configured_symbol, stream, actual_symbol, _status = parts
+        if stream in {"bidask", "tick"}:
+            expected.add((security_type, exchange, actual_symbol, stream))
+    return expected
+
+
+def _observed_streams(activity: list[dict[str, Any]]) -> set[tuple[str, str, str, str]]:
+    return {
+        (row["security_type"], row["exchange"], row["symbol"], row["stream"])
+        for row in activity
+        if row["received"] > 0
+    }
+
+
+def _all_expected_streams_observed(
+    results: list[str],
+    activity: list[dict[str, Any]],
+) -> bool:
+    expected = _expected_streams(results)
+    return bool(expected) and expected <= _observed_streams(activity)
+
+
 def _session_summary(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": _token(row["status"]),
@@ -71,6 +151,26 @@ def _health_summary(path: str | Path, max_age_seconds: float) -> dict[str, Any]:
         counters = raw.get("counters") if isinstance(raw.get("counters"), dict) else {}
         storage = raw.get("storage_capacity") if isinstance(raw.get("storage_capacity"), dict) else None
         results = raw.get("subscription_results") if isinstance(raw.get("subscription_results"), list) else []
+        stream_activity = _stream_activity_summary(raw.get("stream_activity"))
+        now = datetime.now(updated.tzinfo)
+        for activity in stream_activity:
+            last_received_at = activity["last_received_at"]
+            last_received = (
+                None if last_received_at is None else datetime.fromisoformat(last_received_at)
+            )
+            if last_received is not None and last_received.tzinfo is None:
+                last_received = last_received.replace(tzinfo=updated.tzinfo)
+            activity["last_received_age_seconds"] = (
+                None
+                if last_received is None
+                else round(
+                    max(
+                        0.0,
+                        (now - last_received).total_seconds(),
+                    ),
+                    3,
+                )
+            )
         return {
             "readable": True,
             "fresh": 0 <= age <= max_age_seconds,
@@ -79,6 +179,7 @@ def _health_summary(path: str | Path, max_age_seconds: float) -> dict[str, Any]:
             "subscriptions_active": int(raw.get("subscriptions_active", 0)),
             "subscriptions_failed": int(raw.get("subscriptions_failed", 0)),
             "subscription_results": [_token(value) for value in results],
+            "stream_activity": stream_activity,
             "queue_size": int(raw.get("queue_size", 0)),
             "queue_capacity": int(raw.get("queue_capacity", 0)),
             "storage_capacity": None if storage is None else {
@@ -101,6 +202,7 @@ def _health_summary(path: str | Path, max_age_seconds: float) -> dict[str, Any]:
             "subscriptions_active": 0,
             "subscriptions_failed": 0,
             "subscription_results": [],
+            "stream_activity": [],
             "queue_size": 0,
             "queue_capacity": 0,
             "storage_capacity": None,
@@ -221,6 +323,24 @@ def collect_acceptance_report(
         if count_rows:
             completed_session["market_rows"] = int(count_rows[0]["market_rows"])
             completed_session["open_gaps"] = int(count_rows[0]["open_gaps"])
+        completed_activity = client.query("""
+            SELECT stream, security_type, exchange, symbol,
+                   count() AS rows,
+                   min(event_ts) AS first_event_ts,
+                   max(event_ts) AS last_event_ts
+            FROM (
+              SELECT 'bidask' AS stream, security_type, exchange, symbol, event_ts
+              FROM lob_events WHERE session_id = {session_id:UUID}
+              UNION ALL
+              SELECT 'tick' AS stream, security_type, exchange, symbol, event_ts
+              FROM tick_events WHERE session_id = {session_id:UUID}
+            )
+            GROUP BY stream, security_type, exchange, symbol
+            ORDER BY security_type, exchange, symbol, stream
+        """, parameters={"session_id": str(completed_row["session_id"])})
+        completed_session["stream_activity"] = _stream_activity_summary(
+            _rows(completed_activity)
+        )
     gaps = [
         {
             "category": _token(row["category"]),
@@ -256,11 +376,23 @@ def collect_acceptance_report(
         completed_session and completed_session.get("open_gaps") == 0
     )
     completed_simulation = bool(completed_session and completed_session["simulation"])
+    current_streams_observed = _all_expected_streams_observed(
+        health["subscription_results"],
+        health["stream_activity"],
+    )
+    completed_streams_observed = bool(
+        completed_session
+        and _all_expected_streams_observed(
+            completed_session["subscription_results"],
+            completed_session.get("stream_activity", []),
+        )
+    )
     checks = {
         "health_fresh": bool(health["fresh"]),
         "collector_operational": health["status"] in {"running", "degraded"},
         "simulation_only": bool(session and session["simulation"]),
         "subscriptions_active": health["subscriptions_active"] > 0,
+        "current_session_all_subscribed_streams_observed": current_streams_observed,
         "market_rows_present": lob_rows + tick_rows > 0,
         "both_streams_present": lob_rows > 0 and tick_rows > 0,
         "stock_both_streams_present": streams_by_security_type["STK"],
@@ -272,6 +404,7 @@ def collect_acceptance_report(
         "completed_session_rows_reconciled": completed_rows_reconciled,
         "completed_session_no_drops": completed_no_drops,
         "completed_session_no_open_gaps": completed_no_open_gaps,
+        "completed_session_all_subscribed_streams_observed": completed_streams_observed,
         "completed_session_reconciled": (
             completed_simulation
             and completed_rows_reconciled

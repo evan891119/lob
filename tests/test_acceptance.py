@@ -60,7 +60,10 @@ class FakeClient:
                 "enabled_symbols": 1,
                 "subscriptions_active": 2,
                 "subscriptions_failed": 0,
-                "subscription_results": ["STK:TSE:2330:tick:2330:subscribed"],
+                "subscription_results": [
+                    "STK:TSE:2330:bidask:2330:subscribed",
+                    "STK:TSE:2330:tick:2330:subscribed",
+                ],
                 "received": 30,
                 "written": 30,
                 "spooled": 0,
@@ -80,7 +83,28 @@ class FakeClient:
                 "started_at": "2026-01-02 09:00:00",
                 "ended_at": "2026-01-02 13:30:00",
             }])
-        if "{session_id:UUID}" in statement:
+        if "GROUP BY stream, security_type" in statement:
+            return Result([
+                {
+                    "stream": "bidask",
+                    "security_type": "STK",
+                    "exchange": "TSE",
+                    "symbol": "2330",
+                    "rows": 20,
+                    "first_event_ts": "2026-01-02 09:00:00+08:00",
+                    "last_event_ts": "2026-01-02 13:29:59+08:00",
+                },
+                {
+                    "stream": "tick",
+                    "security_type": "STK",
+                    "exchange": "TSE",
+                    "symbol": "2330",
+                    "rows": 10,
+                    "first_event_ts": "2026-01-02 09:00:00+08:00",
+                    "last_event_ts": "2026-01-02 13:29:58+08:00",
+                },
+            ])
+        if "AS market_rows" in statement and "{session_id:UUID}" in statement:
             self.last_parameters = parameters
             return Result([{"market_rows": 30, "open_gaps": 0}])
         if "capture_sessions_latest" in statement:
@@ -91,7 +115,10 @@ class FakeClient:
                 "enabled_symbols": 1,
                 "subscriptions_active": 2,
                 "subscriptions_failed": 0,
-                "subscription_results": ["STK:TSE:2330:tick:2330:subscribed"],
+                "subscription_results": [
+                    "STK:TSE:2330:bidask:2330:subscribed",
+                    "STK:TSE:2330:tick:2330:subscribed",
+                ],
                 "received": 30,
                 "written": 30,
                 "spooled": 0,
@@ -134,8 +161,30 @@ class AcceptanceTests(unittest.TestCase):
             "subscriptions_active": 2,
             "subscriptions_failed": 0,
             "subscription_results": [
+                "STK:TSE:2330:bidask:2330:subscribed",
                 "STK:TSE:2330:tick:2330:subscribed",
                 "SJ_API_KEY:PRIVATE_SUBSCRIPTION_CANARY",
+            ],
+            "stream_activity": [
+                {
+                    "security_type": "STK",
+                    "exchange": "TSE",
+                    "symbol": "2330",
+                    "stream": "bidask",
+                    "received": 20,
+                    "first_received_at": "2026-01-02T09:00:00+08:00",
+                    "last_received_at": "2026-01-02T13:29:59+08:00",
+                    "private": "PRIVATE_ACTIVITY_CANARY",
+                },
+                {
+                    "security_type": "STK",
+                    "exchange": "TSE",
+                    "symbol": "2330",
+                    "stream": "tick",
+                    "received": 10,
+                    "first_received_at": "2026-01-02T09:00:00+08:00",
+                    "last_received_at": "2026-01-02T13:29:58+08:00",
+                },
             ],
             "counters": {"received": 30, "written": 30, "unknown_private": "PRIVATE_VALUE"},
         }
@@ -152,6 +201,7 @@ class AcceptanceTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_ACCOUNT_CANARY", encoded)
         self.assertNotIn("PRIVATE_VALUE", encoded)
         self.assertNotIn("PRIVATE_SUBSCRIPTION_CANARY", encoded)
+        self.assertNotIn("PRIVATE_ACTIVITY_CANARY", encoded)
         self.assertTrue(report["checks"]["health_fresh"])
         self.assertTrue(report["checks"]["simulation_only"])
         self.assertTrue(report["checks"]["both_streams_present"])
@@ -165,8 +215,14 @@ class AcceptanceTests(unittest.TestCase):
         self.assertTrue(report["checks"]["completed_session_rows_reconciled"])
         self.assertTrue(report["checks"]["completed_session_no_drops"])
         self.assertTrue(report["checks"]["completed_session_no_open_gaps"])
+        self.assertTrue(report["checks"]["current_session_all_subscribed_streams_observed"])
+        self.assertTrue(report["checks"]["completed_session_all_subscribed_streams_observed"])
         self.assertTrue(report["checks"]["completed_session_reconciled"])
         self.assertEqual(report["latest_completed_session"]["market_rows"], 30)
+        self.assertIsInstance(
+            report["health"]["stream_activity"][0]["last_received_age_seconds"],
+            float,
+        )
         self.assertNotIn("PRIVATE_COMPLETED_SESSION_CANARY", encoded)
 
     def test_unreadable_health_is_safe_and_fails_health_checks(self):
@@ -187,7 +243,7 @@ class AcceptanceTests(unittest.TestCase):
         class MismatchClient(FakeClient):
             def query(self, statement, parameters=None):
                 result = super().query(statement, parameters)
-                if "{session_id:UUID}" in statement:
+                if "AS market_rows" in statement and "{session_id:UUID}" in statement:
                     return Result([{"market_rows": 29, "open_gaps": 0}])
                 return result
 
@@ -206,6 +262,39 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertFalse(report["checks"]["completed_session_rows_reconciled"])
         self.assertFalse(report["checks"]["completed_session_reconciled"])
+
+    def test_missing_completed_stream_is_visible_without_changing_row_reconciliation(self):
+        class MissingStreamClient(FakeClient):
+            def query(self, statement, parameters=None):
+                if "GROUP BY stream, security_type" in statement:
+                    return Result([{
+                        "stream": "tick",
+                        "security_type": "STK",
+                        "exchange": "TSE",
+                        "symbol": "2330",
+                        "rows": 30,
+                        "first_event_ts": "2026-01-02 09:00:00+08:00",
+                        "last_event_ts": "2026-01-02 13:29:58+08:00",
+                    }])
+                return super().query(statement, parameters)
+
+        health = {
+            "status": "running",
+            "updated_at": datetime.now(TAIPEI).isoformat(),
+            "storage_capacity": {"bytes_percent": 10, "inode_percent": 1, "used_percent": 10},
+        }
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: MissingStreamClient())
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            path = Path(folder) / "health.json"
+            path.write_text(json.dumps(health))
+            report = collect_acceptance_report("clickhouse", path)
+
+        self.assertTrue(report["checks"]["completed_session_reconciled"])
+        self.assertFalse(
+            report["checks"]["completed_session_all_subscribed_streams_observed"]
+        )
 
     def test_missing_completed_session_is_reported_as_unavailable(self):
         class NoCompletedClient(FakeClient):

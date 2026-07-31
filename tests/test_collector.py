@@ -13,6 +13,11 @@ from lob_recorder.storage import Capacity
 EVENT = {"stream": "tick", "exchange": "TSE", "security_type": "STK", "symbol": "2330",
          "event_ts": "2026-01-02T09:00:00+08:00", "close": 100, "volume": 1, "total_volume": 1,
          "tick_type": 1, "best_bid_price": 99, "best_bid_volume": 1, "best_ask_price": 100, "best_ask_volume": 2}
+BIDASK_EVENT = {
+    "stream": "bidask", "exchange": "TSE", "security_type": "STK", "symbol": "2330",
+    "event_ts": "2026-01-02T09:00:00+08:00",
+    "bid_price": [99], "bid_volume": [1], "ask_price": [100], "ask_volume": [2],
+}
 
 
 class FailingSink:
@@ -208,6 +213,28 @@ class CollectorTests(unittest.TestCase):
             health = json.loads((root / "health.json").read_text())
             self.assertEqual(health["status"], "stopped")
             self.assertIn("queue_high_water", health["counters"])
+
+    def test_health_tracks_each_public_symbol_stream_activity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            collector = Collector(
+                JsonlSink(root / "events.jsonl"), root / "spool",
+                root / "log/collector.log", root / "health.json",
+                batch_size=2, flush_ms=5,
+            )
+            collector.start()
+            collector.emit(EVENT)
+            collector.emit(EVENT)
+            collector.emit(BIDASK_EVENT)
+            collector.stop()
+            health = json.loads((root / "health.json").read_text())
+
+            self.assertEqual(
+                [(row["stream"], row["received"]) for row in health["stream_activity"]],
+                [("bidask", 1), ("tick", 2)],
+            )
+            self.assertTrue(all(row["first_received_at"] for row in health["stream_activity"]))
+            self.assertTrue(all(row["last_received_at"] for row in health["stream_activity"]))
 
     def test_process_resources_are_health_and_session_metrics(self):
         with tempfile.TemporaryDirectory() as folder:

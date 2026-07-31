@@ -119,6 +119,8 @@ class Collector:
         self._capacity: Capacity | None = None
         self._health_status = "created"
         self._health_lock = threading.Lock()
+        self._activity_lock = threading.Lock()
+        self._stream_activity: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._resource_lock = threading.Lock()
         try:
             initial_resources = self.resource_probe()
@@ -158,6 +160,27 @@ class Collector:
             self.queue.put_nowait(event)
             self.counters.received += 1
             self.counters.queue_high_water = max(self.counters.queue_high_water, self.queue.qsize())
+            activity_key = (
+                event["security_type"],
+                event["exchange"],
+                event["symbol"],
+                event["stream"],
+            )
+            with self._activity_lock:
+                activity = self._stream_activity.get(activity_key)
+                if activity is None:
+                    self._stream_activity[activity_key] = {
+                        "security_type": event["security_type"],
+                        "exchange": event["exchange"],
+                        "symbol": event["symbol"],
+                        "stream": event["stream"],
+                        "received": 1,
+                        "first_received_at": event["received_ts"],
+                        "last_received_at": event["received_ts"],
+                    }
+                else:
+                    activity["received"] += 1
+                    activity["last_received_at"] = event["received_ts"]
         except queue.Full:
             self.counters.dropped += 1
             self._notice("queue_overflow", category="queue", count=1)
@@ -401,6 +424,11 @@ class Collector:
 
         with self._health_lock:
             resources = self._sample_process_resources()
+            with self._activity_lock:
+                stream_activity = [
+                    dict(activity)
+                    for _, activity in sorted(self._stream_activity.items())
+                ]
             self.health_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             payload = {
                 "status": status,
@@ -416,6 +444,7 @@ class Collector:
                 "subscriptions_active": self.subscriptions_active,
                 "subscriptions_failed": self.subscriptions_failed,
                 "subscription_results": self.subscription_results,
+                "stream_activity": stream_activity,
                 "counters": asdict(self.counters),
                 "process_resources": {
                     "cpu_seconds": resources.cpu_seconds,
