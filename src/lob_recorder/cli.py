@@ -25,6 +25,7 @@ from lob_recorder.privacy import correlation_id
 from lob_recorder.privacy_tools import inspect_spool_schema, inventory, purge_runtime, purge_spool
 from lob_recorder.quality import inspect, inspect_parquet
 from lob_recorder.reboot import build_reboot_evidence, write_reboot_evidence
+from lob_recorder.resource_evidence import parse_samples, write_resource_report
 from lob_recorder.sinks import ClickHouseSink, JsonlSink, read_jsonl
 from lob_recorder.sources.fixture import FixtureSource
 from lob_recorder.storage import STORAGE_MARKER, ensure_layout, usable_bytes, validate_storage
@@ -314,6 +315,17 @@ def command_pilot_report(args) -> None:
     print("pilot report complete")
 
 
+def command_resource_report(args) -> None:
+    import sys
+
+    try:
+        report = parse_samples(sys.stdin)
+        write_resource_report(report, args.output)
+    except (OSError, TypeError, ValueError) as exc:
+        raise SystemExit(f"resource report failed: {type(exc).__name__}") from None
+    print("resource report complete")
+
+
 def command_acceptance_report(args) -> None:
     try:
         report = collect_acceptance_report(args.host, args.health_file, args.max_health_age)
@@ -376,6 +388,7 @@ def parser() -> argparse.ArgumentParser:
     quality = sub.add_parser("quality"); quality_input = quality.add_mutually_exclusive_group(required=True); quality_input.add_argument("--input"); quality_input.add_argument("--parquet"); quality.add_argument("--max-gap-seconds", type=float, default=60.0); quality.add_argument("--complete-sequence-scope", action="store_true", help="assert that input contains every market event for each included session interval"); quality.set_defaults(func=command_quality)
     export = sub.add_parser("export"); export.add_argument("--host", default="clickhouse"); export_target = export.add_mutually_exclusive_group(required=True); export_target.add_argument("--symbol"); export_target.add_argument("--all-symbols", action="store_true"); export.add_argument("--security-type", choices=("STK", "FUT", "OPT")); export.add_argument("--exchange"); export.add_argument("--date", required=True); export.add_argument("--output", required=True); export.set_defaults(func=command_export)
     pilot = sub.add_parser("pilot-report"); pilot.add_argument("--host", default="clickhouse"); pilot.add_argument("--output", required=True); pilot.add_argument("--storage-total-bytes", type=int); pilot.add_argument("--start-date", type=date.fromisoformat); pilot.add_argument("--end-date", type=date.fromisoformat); pilot.set_defaults(func=command_pilot_report)
+    resources = sub.add_parser("resource-report"); resources.add_argument("--output", required=True); resources.set_defaults(func=command_resource_report)
     acceptance = sub.add_parser("acceptance-report"); acceptance.add_argument("--host", default="clickhouse"); acceptance.add_argument("--health-file", default="/var/lib/lob/private-runtime/collector/health.json"); acceptance.add_argument("--max-health-age", type=float, default=90); acceptance.add_argument("--output"); acceptance.set_defaults(func=command_acceptance_report)
     outage = sub.add_parser("outage-verify"); outage.add_argument("--before", required=True); outage.add_argument("--after", required=True); outage.add_argument("--outage-seconds", required=True, type=int); outage.add_argument("--output", required=True); outage.set_defaults(func=command_outage_verify)
     network_outage = sub.add_parser("network-outage-verify"); network_outage.add_argument("--before", required=True); network_outage.add_argument("--after", required=True); network_outage.add_argument("--outage-seconds", required=True, type=int); network_outage.add_argument("--output", required=True); network_outage.set_defaults(func=command_network_outage_verify)

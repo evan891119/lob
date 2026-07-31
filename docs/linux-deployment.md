@@ -208,6 +208,7 @@ sudo scripts/pilot-check \
   /mnt/lob-data deploy/host.env \
   2026-01-02 2026-01-06
 sudo cat /mnt/lob-data/parquet/pilot-report.json
+sudo cat /mnt/lob-data/parquet/pilot-resource-report.json
 ```
 
 `sequence_no` 是 collector session 內跨商品、跨 BidAsk/Tick 共用的流水號。單一商品、單一 stream 或其他部分匯出不能判斷缺號；quality report 會 fail closed 輸出 `sequence_scope_complete=false` 與 `sequence_gaps=null`。只有 pattern 確實包含所選 session interval 的所有行情事件時，才可加 `--complete-sequence-scope`；錯把部分資料宣告完整會製造假 sequence gap。Duplicate identity 使用 `session_id + sequence_no`，相同 sequence 即使落在不同 stream 也會被偵測。
@@ -226,7 +227,9 @@ ClickHouse 會分開寫入 `lob_events` 與 `tick_events`。若前一張表已�
 
 `capacity_projections` 會以觀測到的每商品／交易日磁碟量與 aggregate EPS，等比例推估 10、50、100 商品的每日、20 個交易日、250 個交易日用量，以及一份只包含新行情資料的 full-copy backup 大小。若提供實際 filesystem usable bytes，也會分別估算各商品數量在 90% 水位可保留的交易日數。`estimated_conservative_peak_sum_events_per_second` 是把各 stream 個別尖峰相加的保守上界，不是同一秒實測 aggregate peak；projection 不包含 replication、版本歷史、增量鏈、加密或檔案系統額外開銷。`minimum_dataset_scope_reached=false` 時仍會輸出數學估算供診斷，但不得拿來做最終容量決策。
 
-每個 capture session 另保存 collector process 自該 session 開始的累積 CPU seconds 與 process lifetime max RSS bytes；`pilot-report` 依 session duration 算出 `average_process_cpu_percent`。CPU percent 是整個 process 的平均值，可能因多核心工作超過 100%；max RSS 是高水位而非當下記憶體。這些數字只涵蓋 collector container，不包含 ClickHouse container，因此最終 pilot 還要另記錄 ClickHouse 的 CPU／memory 使用量後才能回答整套主機資源需求。
+每個 capture session 另保存 collector process 自該 session 開始的累積 CPU seconds 與 process lifetime max RSS bytes；`pilot-report` 依 session duration 算出 `average_process_cpu_percent`。CPU percent 是整個 process 的平均值，可能因多核心工作超過 100%；max RSS 是高水位而非當下記憶體。
+
+`scripts/pilot-check` 另外以 `docker stats --no-stream` 對 collector 與 ClickHouse 各取三次樣本，產生 `pilot-resource-report.json` 的 CPU min/average/max、memory min/average/max、limit 與 percent。輸出只允許兩個固定 service label 與數值，不包含 container ID/name、hostname 或 host path；原始樣本以 `0600` 暫存在 `private-runtime/pilot/`，並由 trap 在成功、失敗或 interrupt 時立即刪除。此報告明列 `point_in_time_samples=true`，只能證明執行驗收當下的資源量，最終整機 sizing 仍要在代表性高流量時段重跑或使用外部長期監控，不能把三次樣本冒充整日尖峰。
 
 把量測填入 `reports/pilot-template.md` 後才能決定 retention 與 20TB 可保存年限；空資料集的 ratio、projection values 與 retention days 都會是 `null`，不產生虛構估算。
 

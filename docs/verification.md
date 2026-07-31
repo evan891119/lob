@@ -4,7 +4,7 @@
 
 ## 本機已完成
 
-- Python 3.14 host 上以 `PYTHONPATH=src` 執行 111 個 stdlib unit tests。
+- Python 3.14 host 上以 `PYTHONPATH=src` 執行 115 個 stdlib unit tests。
 - Docker image 以 Python 3.12 與 pinned dependencies 建置成功。
 - Pinned Shioaji 1.5.3 在無 credential/read-only container 中確認 contract descriptor、BidAsk/Tick STK/FOP callbacks、system callbacks、subscribe/unsubscribe surface 存在。
 - Shioaji source 同時支援新版 lowercase contract facade 與 1.5 legacy uppercase facade；legacy direct lookup、exchange group fallback、safe login/lookup category 與全訂閱失敗結果均有無 credential unit test。
@@ -29,6 +29,7 @@
 - Shioaji reconnect proof：event `13` callback 只 signal main thread，main thread 才重新訂閱已解析商品的全部 configured streams；逐 stream 結果仍使用安全 category，成功後才記錄 reconnect/close gap，全部失敗則 exponential retry。Network drill 只 disconnect collector 的 Compose outbound network，保留 ClickHouse internal network，並以 exit trap 恢復；wrapper confirmation/bounds 與 verifier 的 same-session/reconnect/subscription/closed-gap/no-drop/no-leak checks 有 unit proof，但尚未冒充目標 Linux 實際 network drill。
 - Health atomic-write concurrency proof：main/worker 共用單一 lock 保護同一 `health.tmp` 的 write/replace；8 threads 各寫 50 次後沒有 exception，最終 JSON 仍可解析，避免並行 replace 偶發遺失 temporary file。
 - Process resource proof：collector 將 session-relative CPU seconds 與 process max RSS bytes 寫入 health/capture session；pilot report 以 session duration 計算 average process CPU percent。注入式 unit probe 證明數值轉換與持久化，不冒充目標 Linux 或 ClickHouse container 的實際資源量測。
+- Container resource evidence proof：resource parser 只接受固定 `clickhouse`／`collector` service label、至少三組對齊的 sample number，以及 CPU/memory/limit/percent 數值；支援 Docker stats 的 decimal/binary size units，缺 service、樣本不足、memory limit 改變或帶入其他 label 都 fail closed 且錯誤不回顯輸入。`pilot-check` 的原始樣本使用 `0600` private-runtime temporary file 與 exit/interrupt trap 清除，report 不含 container ID/name、hostname 或 host path，並明列 point-in-time 限制。
 - Per-stream activity proof：callback 成功進 queue 後，health 以 lock-safe 公開欄位逐一累計實際 `security_type + exchange + symbol + stream` 的 received、首末接收時間；acceptance allowlist 只保留這些公開市場欄位並計算末次接收 age。最近 completed session 另由兩張 market tables 依內部 UUID 分組查詢每條 stream 的 rows/首末時間，輸出不含 UUID；缺少任一成功訂閱 stream 時 coverage check 會失敗，但不會竄改既有 rows reconciliation 的意義。
 - Host reboot proof tooling：prepare/verify wrapper 都需要明確 confirmation；raw boot identifier 只以 `10001:10001`/`0600` 暫存在可 purge 的 private-runtime，report 不含該值。Verifier 要求 boot 改變、collector session 改變、simulation、最早歷史 event 保留、LOB/Tick rows 不減、health/subscriptions/storage/no-open-gap 全通過；same boot/session 與 private canary cases 有 unit proof，但尚未冒充目標 Linux 實際 reboot。
 

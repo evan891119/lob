@@ -21,6 +21,13 @@
 | queue usage (%) | | | |
 | collector process CPU (%) | | | |
 | collector process max RSS (bytes) | | | |
+| ClickHouse point-in-time CPU (%) | | | |
+| ClickHouse point-in-time memory (bytes) | | | |
+| collector container point-in-time memory (bytes) | | | |
+
+- `pilot-resource-report.json` 的 `point_in_time_samples`：
+- 資源樣本是否在代表性高流量時段取得：
+- 是否另有完整 pilot 期間的外部監控：
 
 | 商品 | lob rows/day | tick rows/day | bytes on disk/day | compression ratio |
 | --- | ---: | ---: | ---: | ---: |

@@ -9,6 +9,13 @@ data_root="$1"
 host_env="$2"
 start_date="$3"
 end_date="$4"
+samples_file="$data_root/private-runtime/pilot/resource-samples.txt"
+
+umask 077
+cleanup() {
+  unlink "$samples_file" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
 
 printf '%s\n' "$start_date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
   || { echo "pilot start date must use YYYY-MM-DD" >&2; exit 1; }
@@ -19,11 +26,47 @@ test "$start_date" \< "$end_date" || test "$start_date" = "$end_date" \
 
 scripts/acceptance-check "$data_root" "$host_env"
 
-docker compose --env-file "$host_env" exec -T collector \
+dc() {
+  docker compose --env-file "$host_env" "$@"
+}
+
+dc exec -T collector \
   lob-recorder pilot-report \
   --host clickhouse \
   --start-date "$start_date" \
   --end-date "$end_date" \
   --output /var/lib/lob/parquet/pilot-report.json
 
-echo "pilot check complete; privacy-safe reports written to the data-root parquet area"
+mkdir -p "$data_root/private-runtime/pilot"
+: > "$samples_file"
+sample_number=1
+while test "$sample_number" -le 3; do
+  for service in clickhouse collector; do
+    container_id="$(dc ps -q "$service" 2>/dev/null || true)"
+    test -n "$container_id" \
+      && test "$(printf '%s\n' "$container_id" | wc -l | tr -d ' ')" -eq 1 \
+      || { echo "required compose service is unavailable for resource sampling" >&2; exit 1; }
+    stats="$(docker stats --no-stream \
+      --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}' \
+      "$container_id" 2>/dev/null)"
+    test -n "$stats" && test "$(printf '%s\n' "$stats" | wc -l | tr -d ' ')" -eq 1 \
+      || { echo "resource sample is unavailable" >&2; exit 1; }
+    cpu="$(printf '%s\n' "$stats" | cut -d '|' -f 1)"
+    memory="$(printf '%s\n' "$stats" | cut -d '|' -f 2)"
+    memory_percent="$(printf '%s\n' "$stats" | cut -d '|' -f 3)"
+    memory_used="$(printf '%s\n' "$memory" | cut -d '/' -f 1 | tr -d ' ')"
+    memory_limit="$(printf '%s\n' "$memory" | cut -d '/' -f 2 | tr -d ' ')"
+    printf '%s|%s|%s|%s|%s|%s\n' \
+      "$service" "$cpu" "$memory_used" "$memory_limit" "$memory_percent" "$sample_number" \
+      >> "$samples_file"
+  done
+  test "$sample_number" -eq 3 || sleep 2
+  sample_number=$((sample_number + 1))
+done
+
+dc exec -T collector \
+  lob-recorder resource-report \
+  --output /var/lib/lob/parquet/pilot-resource-report.json \
+  < "$samples_file"
+
+echo "pilot check complete; privacy-safe pilot and resource reports written to the data-root parquet area"
