@@ -15,6 +15,24 @@ def _rows(result) -> list[dict]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
 
+def _subscribed_identities(session_rows: list[dict]) -> set[tuple[str, str, str]]:
+    identities = set()
+    for row in session_rows:
+        results = row.get("subscription_results", [])
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            parts = str(result).split(":")
+            if (
+                len(parts) == 6
+                and parts[3] in {"bidask", "tick"}
+                and parts[5] in {"subscribed", "resubscribed"}
+                and all(part.replace(".", "").replace("_", "").isalnum() for part in parts)
+            ):
+                identities.add((parts[0], parts[1], parts[4]))
+    return identities
+
+
 def _scope_part_metrics(
     part_rows: list[dict], market_rows: list[dict], *, filtered: bool
 ) -> tuple[int, int, int]:
@@ -255,8 +273,8 @@ def collect_report(
         GROUP BY table ORDER BY table
     """)
     sessions = client.query(f"""
-        SELECT session_id, started_at, ended_at, status, symbols, subscription_results,
-               received, written, spooled, replayed, dropped,
+        SELECT started_at, ended_at, status, simulation, symbols, subscription_results,
+               received, written, spooled, replayed, dropped, notice_dropped,
                reconnects, queue_capacity, queue_high_water,
                round(if(queue_capacity > 0, queue_high_water * 100.0 / queue_capacity, 0), 3) AS queue_high_water_percent,
                capacity_bytes_percent, capacity_inode_percent, capacity_used_percent,
@@ -309,13 +327,22 @@ def collect_report(
         if total_compressed_data_bytes
         else None
     )
-    trading_days = len({str(row["trading_date"]) for row in market_rows})
-    observed_products = len(
-        {
-            (str(row["security_type"]), str(row["exchange"]), str(row["symbol"]))
-            for row in market_rows
-        }
-    )
+    observed_dates = {str(row["trading_date"]) for row in market_rows}
+    observed_identities = {
+        (str(row["security_type"]), str(row["exchange"]), str(row["symbol"]))
+        for row in market_rows
+    }
+    trading_days = len(observed_dates)
+    observed_products = len(observed_identities)
+    streams_by_identity_date: dict[tuple[str, str, str, str], set[str]] = {}
+    for row in market_rows:
+        key = (
+            str(row["security_type"]),
+            str(row["exchange"]),
+            str(row["symbol"]),
+            str(row["trading_date"]),
+        )
+        streams_by_identity_date.setdefault(key, set()).add(str(row["table"]))
     average_bytes_per_day = round(total_bytes_on_disk / trading_days) if trading_days else 0
     pilot_scope = {
         "observed_products": observed_products,
@@ -344,6 +371,64 @@ def collect_report(
         total_bytes_on_disk=total_bytes_on_disk,
         stop_bytes=storage["stop_90_bytes"] if storage is not None else None,
     )
+    session_rows = _rows(sessions)
+    gap_rows = _rows(gaps)
+    subscribed_identities = _subscribed_identities(session_rows)
+    all_subscribed_products_observed = bool(subscribed_identities) and (
+        subscribed_identities <= observed_identities
+    )
+    expected_identity_dates = {
+        (*identity, trading_date)
+        for identity in (observed_identities | subscribed_identities)
+        for trading_date in observed_dates
+    }
+    all_products_all_days_both_streams = bool(expected_identity_dates) and all(
+        streams_by_identity_date.get(key) == {"lob_events", "tick_events"}
+        for key in expected_identity_dates
+    )
+    for row in session_rows:
+        row.pop("subscription_results", None)
+    sessions_available = bool(session_rows)
+    sessions_simulation_only = sessions_available and all(
+        bool(row.get("simulation")) for row in session_rows
+    )
+    sessions_no_drops = sessions_available and all(
+        int(row.get("dropped", 0)) == 0
+        and int(row.get("notice_dropped", 0)) == 0
+        for row in session_rows
+    )
+    scoped_sessions_completed = sessions_available and all(
+        row.get("ended_at") is not None for row in session_rows
+    )
+    no_open_gaps = all(int(row.get("open_intervals", 0)) == 0 for row in gap_rows)
+    storage_projection_available = bool(
+        storage
+        and total_bytes_on_disk > 0
+        and projections["basis"]["bytes_on_disk_per_product_trading_day"] is not None
+    )
+    checks = {
+        "minimum_dataset_scope_reached": pilot_scope["minimum_dataset_scope_reached"],
+        "recommended_five_day_scope_reached": pilot_scope["recommended_five_day_scope_reached"],
+        "all_subscribed_products_observed": all_subscribed_products_observed,
+        "all_products_all_days_both_streams_present": all_products_all_days_both_streams,
+        "sessions_available": sessions_available,
+        "sessions_simulation_only": sessions_simulation_only,
+        "sessions_no_drops": sessions_no_drops,
+        "scoped_sessions_completed": scoped_sessions_completed,
+        "no_open_gaps": no_open_gaps,
+        "storage_projection_available": storage_projection_available,
+        "pilot_data_integrity_ready": (
+            pilot_scope["minimum_dataset_scope_reached"]
+            and all_subscribed_products_observed
+            and all_products_all_days_both_streams
+            and sessions_simulation_only
+            and sessions_no_drops
+            and scoped_sessions_completed
+            and no_open_gaps
+            and storage_projection_available
+        ),
+        "full_trading_period_operator_confirmation_required": True,
+    }
     report = {
         "generated_at": datetime.now(TAIPEI).isoformat(),
         "report_scope": {
@@ -358,8 +443,8 @@ def collect_report(
         },
         "market": market_rows,
         "market_parts": part_rows,
-        "capture_sessions": _rows(sessions),
-        "capture_gaps": _rows(gaps),
+        "capture_sessions": session_rows,
+        "capture_gaps": gap_rows,
         "pilot_scope": pilot_scope,
         "bytes_on_disk": total_bytes_on_disk,
         "compressed_data_bytes": total_compressed_data_bytes,
@@ -372,6 +457,7 @@ def collect_report(
         },
         "storage": storage,
         "capacity_projections": projections,
+        "checks": checks,
     }
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

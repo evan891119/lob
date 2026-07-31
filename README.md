@@ -24,6 +24,10 @@ docker compose --env-file /etc/shioaji-lob-recorder/host.env config --quiet
 docker compose --env-file /etc/shioaji-lob-recorder/host.env up -d --build
 sudo scripts/docker-boot-readiness-check /etc/shioaji-lob-recorder/host.env
 sudo scripts/acceptance-check /mnt/lob-data /etc/shioaji-lob-recorder/host.env
+# 收滿選定日期後，再用實際日期產生 scoped pilot/retention report
+sudo scripts/pilot-check \
+  /mnt/lob-data /etc/shioaji-lob-recorder/host.env \
+  YYYY-MM-DD YYYY-MM-DD
 ```
 
 正式啟動前必須由部署者在 repo 外建立 `/etc/shioaji-lob-recorder/host.env`，以及 owner/mode 為 `10001:10001`/`0600` 的 `/etc/shioaji-lob-recorder/shioaji.env`。不要把真實值貼進 issue、commit、shell command 或對話。

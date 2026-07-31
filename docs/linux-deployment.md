@@ -179,34 +179,35 @@ sudo cat /mnt/lob-data/parquet/reboot-report.json
 ## 4. 查詢、匯出與品質
 
 ```bash
-docker compose exec -T clickhouse clickhouse-client \
+docker compose --env-file deploy/host.env exec -T clickhouse clickhouse-client \
   --param_security_type=STK --param_exchange=TSE \
   --param_symbol=2330 --param_trading_date=2026-01-02 \
   --param_start='2026-01-02 09:00:00' --param_end='2026-01-02 13:30:00' \
   < queries/events_by_symbol.sql
 
-docker compose exec -T collector lob-recorder export \
+docker compose --env-file deploy/host.env exec -T collector lob-recorder export \
   --host clickhouse --security-type STK --exchange TSE \
   --symbol 2330 --date 2026-01-02 \
   --output /var/lib/lob/parquet
 
 # 每日匯出當天所有已有資料的公開商品
-docker compose exec -T collector lob-recorder export \
+docker compose --env-file deploy/host.env exec -T collector lob-recorder export \
   --host clickhouse --all-symbols --date 2026-01-02 \
   --output /var/lib/lob/parquet
 
-docker compose exec -T collector lob-recorder quality \
+docker compose --env-file deploy/host.env exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/security_type=STK/exchange=TSE/symbol=2330/trading_date=2026-01-02/*.parquet'
 
 # 只有當 pattern 包含該日期所有商品與兩種 stream，才可宣告 sequence scope 完整
-docker compose exec -T collector lob-recorder quality \
+docker compose --env-file deploy/host.env exec -T collector lob-recorder quality \
   --parquet '/var/lib/lob/parquet/security_type=*/exchange=*/symbol=*/trading_date=2026-01-02/*.parquet' \
   --complete-sequence-scope
 
-docker compose exec -T collector lob-recorder pilot-report \
-  --host clickhouse \
-  --start-date 2026-01-02 --end-date 2026-01-06 \
-  --output /var/lib/lob/parquet/pilot-report.json
+# 推薦入口：先重跑唯讀 acceptance，再產生 scoped pilot report
+sudo scripts/pilot-check \
+  /mnt/lob-data deploy/host.env \
+  2026-01-02 2026-01-06
+sudo cat /mnt/lob-data/parquet/pilot-report.json
 ```
 
 `sequence_no` 是 collector session 內跨商品、跨 BidAsk/Tick 共用的流水號。單一商品、單一 stream 或其他部分匯出不能判斷缺號；quality report 會 fail closed 輸出 `sequence_scope_complete=false` 與 `sequence_gaps=null`。只有 pattern 確實包含所選 session interval 的所有行情事件時，才可加 `--complete-sequence-scope`；錯把部分資料宣告完整會製造假 sequence gap。Duplicate identity 使用 `session_id + sequence_no`，相同 sequence 即使落在不同 stream 也會被偵測。
@@ -219,7 +220,9 @@ ClickHouse 會分開寫入 `lob_events` 與 `tick_events`。若前一張表已�
 
 未指定 `--storage-total-bytes` 時，report 直接讀取 `LOB_STORAGE_ROOT` 所在 filesystem 對 service 可用的 bytes（排除 filesystem reserved free blocks）；參數只保留給受控測試或明確 override。Report 會分開輸出 ClickHouse `bytes_on_disk`、`compressed_data_bytes`、`uncompressed_data_bytes` 與 `compression_ratio`；ratio 定義為 `uncompressed / compressed`，例如 `4.0` 代表資料壓縮為原始大小的約四分之一。未使用日期 filter 時，這些數字是所有 active parts 的 exact totals；使用日期 filter 時，因目前 partition granularity 是月，scope bytes 會依各 table 的 scoped rows / active-part rows 等比例估算，並明確標為 `estimated_by_table_row_share_of_active_parts`。`global_active_parts` 仍保存 exact totals 供核對，retention/projection 使用 scoped estimate；不得把估算標成實際逐日磁碟 bytes。
 
-`pilot_scope` 會按 `security_type + exchange + symbol` 回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。這些 checks 只描述資料庫中可觀測的範圍，不能證明其中任何一天涵蓋完整交易時段；完整時段仍由部署者依 collector start/end 與市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。
+`pilot_scope` 會按 `security_type + exchange + symbol` 回報觀測商品數與交易日數，並分開判斷至少 3 商品＋1 日的最低 dataset scope，以及至少 3 商品＋5 日的建議 scope。`checks.all_subscribed_products_observed` 會從安全的 subscription descriptors 核對每個成功訂閱的實際商品至少有資料；`all_products_all_days_both_streams_present` 進一步要求日期範圍內每個訂閱或觀測商品在每個觀測日都同時有 BidAsk/Tick。`sessions_simulation_only`、`sessions_no_drops`、`scoped_sessions_completed`、`no_open_gaps` 與 `storage_projection_available` 也必須成立，`pilot_data_integrity_ready` 才會為 true。Report 不輸出 session UUID 或 subscription descriptors。
+
+這些 checks 仍不能從 rows 自動證明每天涵蓋完整交易時段，所以 `full_trading_period_operator_confirmation_required` 固定為 true；部署者仍要依 collector start/end、逐 stream 首末時間與各市場時段確認。Pilot 應設定 3–5 個不同活躍度商品，至少收集一個完整交易日，建議五日。
 
 `capacity_projections` 會以觀測到的每商品／交易日磁碟量與 aggregate EPS，等比例推估 10、50、100 商品的每日、20 個交易日、250 個交易日用量，以及一份只包含新行情資料的 full-copy backup 大小。若提供實際 filesystem usable bytes，也會分別估算各商品數量在 90% 水位可保留的交易日數。`estimated_conservative_peak_sum_events_per_second` 是把各 stream 個別尖峰相加的保守上界，不是同一秒實測 aggregate peak；projection 不包含 replication、版本歷史、增量鏈、加密或檔案系統額外開銷。`minimum_dataset_scope_reached=false` 時仍會輸出數學估算供診斷，但不得拿來做最終容量決策。
 

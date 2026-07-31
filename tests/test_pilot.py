@@ -55,8 +55,22 @@ class FakeClient:
             )
         if "capture_sessions_latest" in statement:
             return Result(
-                ["process_cpu_seconds", "process_max_rss_bytes", "average_process_cpu_percent"],
-                [(25.0, 104_857_600, 12.5)],
+                [
+                    "started_at", "ended_at", "status", "simulation",
+                    "subscription_results", "received", "written", "dropped", "notice_dropped",
+                    "process_cpu_seconds", "process_max_rss_bytes",
+                    "average_process_cpu_percent",
+                ],
+                [(
+                    "2026-01-02 09:00:00", "2026-01-02 13:30:00",
+                    "graceful_stop", True,
+                    [
+                        "STK:TSE:2330:bidask:2330:subscribed",
+                        "STK:TSE:2330:tick:2330:subscribed",
+                    ],
+                    100, 100, 0, 0,
+                    25.0, 104_857_600, 12.5,
+                )],
             )
         if "capture_gaps_latest" in statement:
             return Result([], [])
@@ -83,6 +97,8 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(report["market_parts"][0]["compression_ratio"], 4.0)
         self.assertEqual(report["capture_sessions"][0]["process_max_rss_bytes"], 104_857_600)
         self.assertEqual(report["capture_sessions"][0]["average_process_cpu_percent"], 12.5)
+        self.assertNotIn("session_id", report["capture_sessions"][0])
+        self.assertNotIn("subscription_results", report["capture_sessions"][0])
         self.assertFalse(report["pilot_scope"]["minimum_product_count_reached"])
         self.assertEqual(report["storage"]["observed_trading_days"], 1)
         self.assertEqual(report["storage"]["average_bytes_on_disk_per_day"], 1_000)
@@ -106,6 +122,8 @@ class PilotTests(unittest.TestCase):
             2_500_000,
         )
         self.assertEqual(ten_products["estimated_retention_trading_days_at_90_percent"], 1)
+        self.assertFalse(report["checks"]["minimum_dataset_scope_reached"])
+        self.assertFalse(report["checks"]["pilot_data_integrity_ready"])
 
     def test_report_marks_minimum_and_recommended_pilot_scope(self):
         class FiveDayClient(FakeClient):
@@ -139,6 +157,91 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(report["pilot_scope"]["observed_trading_days"], 5)
         self.assertTrue(report["pilot_scope"]["minimum_dataset_scope_reached"])
         self.assertTrue(report["pilot_scope"]["recommended_five_day_scope_reached"])
+
+    def test_checks_require_every_product_day_to_have_both_streams(self):
+        class CompleteClient(FakeClient):
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
+                if "average_events_per_second" in statement:
+                    rows = []
+                    for day in range(2, 7):
+                        for symbol in ("2330", "2317", "2303"):
+                            for table in ("lob_events", "tick_events"):
+                                rows.append((
+                                    table, "STK", "TSE", symbol,
+                                    f"2026-01-{day:02d}", 100,
+                                    "first", "last", 5, 1, 2, 3,
+                                ))
+                    return Result(result.column_names, rows)
+                if "peak_events_per_second" in statement:
+                    return Result(result.column_names, [])
+                return result
+
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: CompleteClient())
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            output = Path(folder) / "pilot.json"
+            collect_report("clickhouse", output, storage_total=20_000)
+            report = json.loads(output.read_text())
+
+        self.assertTrue(report["checks"]["all_products_all_days_both_streams_present"])
+        self.assertTrue(report["checks"]["all_subscribed_products_observed"])
+        self.assertTrue(report["checks"]["pilot_data_integrity_ready"])
+
+        class MissingDayStreamClient(CompleteClient):
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
+                if "average_events_per_second" in statement:
+                    rows = [
+                        row for row in result.result_rows
+                        if not (
+                            row[0] == "tick_events"
+                            and row[3] == "2330"
+                            and row[4] == "2026-01-06"
+                        )
+                    ]
+                    return Result(result.column_names, rows)
+                return result
+
+        fake_module = SimpleNamespace(
+            get_client=lambda **_kwargs: MissingDayStreamClient()
+        )
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            output = Path(folder) / "pilot.json"
+            collect_report("clickhouse", output, storage_total=20_000)
+            report = json.loads(output.read_text())
+
+        self.assertFalse(report["checks"]["all_products_all_days_both_streams_present"])
+        self.assertFalse(report["checks"]["pilot_data_integrity_ready"])
+
+    def test_subscribed_product_with_no_rows_fails_pilot_readiness(self):
+        class MissingProductClient(FakeClient):
+            def query(self, statement, parameters=None):
+                result = super().query(statement, parameters)
+                if "capture_sessions_latest" in statement:
+                    row = list(result.result_rows[0])
+                    row[result.column_names.index("subscription_results")] = [
+                        "STK:TSE:2330:bidask:2330:subscribed",
+                        "STK:TSE:2330:tick:2330:subscribed",
+                        "STK:TSE:2317:bidask:2317:subscribed",
+                        "STK:TSE:2317:tick:2317:subscribed",
+                    ]
+                    return Result(result.column_names, [tuple(row)])
+                return result
+
+        fake_module = SimpleNamespace(get_client=lambda **_kwargs: MissingProductClient())
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"clickhouse_connect": fake_module}
+        ):
+            output = Path(folder) / "pilot.json"
+            collect_report("clickhouse", output, storage_total=20_000)
+            report = json.loads(output.read_text())
+
+        self.assertFalse(report["checks"]["all_subscribed_products_observed"])
+        self.assertFalse(report["checks"]["pilot_data_integrity_ready"])
 
     def test_scope_distinguishes_same_symbol_across_market_identity(self):
         class SameSymbolClient(FakeClient):
