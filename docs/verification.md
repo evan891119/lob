@@ -47,7 +47,8 @@
 ## 必須在目標 Linux/外部環境完成
 
 - 實際重新開機後掛載／服務恢復由部署者因共用主機決定延後，維持未驗證。
-- OPT 交易時段訂閱；STK＋FUT 兩商品 live gate 已由部署者確認。
+- OPT 交易時段訂閱；`2330` 加大台／小台／微台共四個實際商品的 STK＋FUT live gate 已由部署者確認。
 - 目標 Linux 上的長時間 database outage、ClickHouse/host restart、網路斷線與 replay 測試。
 - 至少一完整交易日、建議五日的 3–5 商品 pilot。
 - 依實際 filesystem 可用 bytes 產生 20TB retention/backup 報告。
+- 用 scoped pilot dataset 重跑新版完整 identity Parquet 匯出、complete-scope quality report 與 DuckDB 雙 stream SQL。

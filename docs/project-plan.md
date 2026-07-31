@@ -453,4 +453,6 @@ Collector 必須先以 fixture 完成無 credential 測試，再由部署者在 
 
 ### Goal 完成邊界
 
-Source、fixture、Docker/Compose 與本機可重現驗證已完成；目標 Linux 當下 mount/layout/credential metadata、shared ext4 bind chain 與實際容量、Docker boot readiness、STK＋三種 FUT live streams、collector rebuild 後歷史資料持久性，以及修正版自然 replay reconciliation，亦已由部署者提供的 privacy-safe report 證實。部署者基於共用主機決定不為驗收刻意 reboot；此項維持未實測、不冒充通過，但不阻止後續 Phase 的外部驗收。整體 goal 尚未完成：仍需 OPT、依各市場時段確認逐 stream 完整性、ClickHouse restart 與長時間 outage/replay 測試，以及實際 pilot retention/backup 決策；若未來自然 reboot，再補做 persistence 證據。在這些條件完成前，不把 Phase 3、4 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。
+Source、fixture、Docker/Compose 與本機可重現驗證已完成；目標 Linux 當下 mount/layout/credential metadata、shared ext4 bind chain 與實際容量、Docker boot readiness、STK＋三種 FUT live streams、collector rebuild 後歷史資料持久性，以及修正版自然 replay reconciliation，亦已由部署者提供的 privacy-safe report 證實。部署者基於共用主機決定不為驗收刻意 reboot；此項維持未實測、不冒充通過，但不阻止後續 Phase 的外部驗收。
+
+整體 goal 尚未完成，剩餘項目都需要目標 Linux、真實交易時段或實際 dataset：OPT live streams；依各市場時段確認逐 stream 完整性；ClickHouse restart、長時間 database outage/replay 與 outbound network drill；scoped 3–5 商品 pilot、20TB retention/backup 與代表性資源決策；以及用該 pilot dataset 重跑新版完整 identity Parquet export、complete-scope quality report 和 DuckDB 雙 stream SQL。若未來自然 reboot，再補做 persistence 證據。在這些條件完成前，不把 Phase 3、4、5 的外部驗收標為完成，也不要求使用者把 credential 提供給 Codex。
