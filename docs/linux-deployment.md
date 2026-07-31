@@ -217,6 +217,8 @@ sudo cat /mnt/lob-data/parquet/pilot-resource-report.json
 
 排序與時間 gap 必須按 `session_id + security_type + exchange + symbol + stream` 分組；同代碼存在不同市場時不得互相混合。完整 scope report 另輸出 records、完整 market identity 數、每個 identity 是否同時有 BidAsk/Tick、結構性 issues 是否全為零，以及 `complete_scope_quality_passed`。`--require-complete-clean` 會先原子寫入 report，再在缺 stream、duplicate、out-of-order、sequence gap、invalid timestamp/identity/stream、負數量或 crossed book 時以非零狀態退出。`time_gaps` 保留為需依市場時段判讀的資訊，不自動讓 structural check 失敗，避免把休市或低流動性冒充資料遺失。
 
+`queries/duckdb_parquet.sql` 的 glob 會同時讀取新版完整 identity partitions 內的 `lob_events.parquet` 與 `tick_events.parquet`，以 filename 對應回 `bidask`／`tick`，並使用 `union_by_name` 將兩種 schema 缺少的欄位補為 `NULL`。範例同時限制 security type、exchange、symbol、date 與半開時間區間，避免把同代碼跨市場或範圍外資料混入；不要把 glob 改回只讀 `lob_events.parquet`。
+
 ClickHouse 會分開寫入 `lob_events` 與 `tick_events`。若前一張表已成功而後一張表失敗，collector 只把尚未確認成功的 stream 放入 market spool；replay 另以 `session_id + sequence_no` 查詢目標 table，跳過可能已由不確定 insert 提交的事件，只補缺少資料。這同時涵蓋連線在 server commit 後才中斷，以及 replay 寫入後、spool 檔案刪除前程序中止的情況。升級不會自動刪除舊 session 已存在的 duplicate；既有資料仍應先以 quality report 確認，再另行安排備份與受控清理。
 
 新版 Parquet 路徑固定使用 `security_type/exchange/symbol/trading_date` 四層 Hive partitions；`--all-symbols` 也按這個完整公開 market identity 分開匯出。單商品匯出建議同時傳入 `--security-type` 與 `--exchange`；若只給 `--symbol`，工具會先查出該日期所有同代碼 identities，再分別輸出，不會合併到同一檔案。升級前已存在的舊 `symbol/trading_date` exports 不會被自動刪除或改寫；需要新 layout 時從 ClickHouse 重新匯出，並以新版 DuckDB glob 查詢，避免同時讀取新舊副本造成重複。
